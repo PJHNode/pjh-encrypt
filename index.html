@@ -218,8 +218,20 @@
   /* ── 결과 ─────────────────────────────────── */
   #result { display: none; margin-top: 28px; padding-top: 24px; border-top: 1px solid var(--rule-soft); position: relative; }
   #result.show { display: block; }
-  .result-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+  .result-head { display: flex; justify-content: space-between; align-items: center;
+                 gap: 10px; flex-wrap: wrap; }
   .result-head label { margin-bottom: 8px; }
+  .head-tools { display: flex; gap: 8px; margin-bottom: 8px; }
+
+  /* 표기 전환 */
+  .seg { display: flex; border: 1px solid var(--rule-soft); }
+  .seg button {
+    padding: 0 11px; border: 0; background: var(--paper); color: var(--ink-dim);
+    cursor: pointer; font-family: var(--serif); font-size: .76rem; font-weight: 700;
+    letter-spacing: .12em;
+  }
+  .seg button + button { border-left: 1px solid var(--rule-soft); }
+  .seg button[aria-pressed="true"] { background: var(--gold); color: var(--paper); }
 
   /* 붉은 낙관 — 글 끝에 찍는 자리. 베끼기 단추와 겹치지 않게 아래쪽에 둔다. */
   .stamp {
@@ -246,6 +258,7 @@
     font-size: .78rem; color: var(--ink-dim); letter-spacing: .02em;
   }
   .stats b { color: var(--ink-mid); font-weight: 700; }
+  .stats .alt { opacity: .7; font-size: .95em; }
 
   .msg {
     display: none; margin-top: 22px; padding: 13px 15px;
@@ -362,7 +375,13 @@
       <span class="stamp" aria-hidden="true">印</span>
       <div class="result-head">
         <label for="output" id="outputLabel">봉인된 글</label>
-        <button type="button" class="ghost" id="copy">베끼기</button>
+        <div class="head-tools">
+          <div class="seg" id="segWrap" role="group" aria-label="표기 방식">
+            <button type="button" id="segHan" aria-pressed="true">한글</button>
+            <button type="button" id="segB85" aria-pressed="false">영문</button>
+          </div>
+          <button type="button" class="ghost" id="copy">베끼기</button>
+        </div>
       </div>
       <textarea id="output" readonly spellcheck="false"></textarea>
       <p class="note" id="note"></p>
@@ -378,6 +397,10 @@
       <li><b>최소</b> 인장은 가장 짧게 줄여 주지만 글이 손대어졌는지 알아챌 수 없고, 같은 글은
         늘 같은 암호문이 됩니다. 정말 짧아야 할 때만 쓰십시오.</li>
       <li>열쇠말을 잊으면 <b>되돌릴 길이 없습니다.</b> 어디에도 남겨 두지 않기 때문입니다.</li>
+      <li>암호문을 <b>한글로 적으면 길이가 절반</b>이 됩니다. 한글 음절은 11172자라 한 글자에
+        13비트를 담을 수 있는 반면, 영문 표기(base85)는 한 글자에 6.4비트뿐입니다.
+        영문·숫자만 받는 곳에 붙일 때만 「영문」으로 바꾸십시오. 붙여 넣을 때는 둘 다
+        알아서 가려 읽습니다.</li>
       <li>여기서 봉인한 글은 Python 판(<code>hangul_crypt.py</code>)으로도 그대로 풀립니다.
         다만 Python이 lzma 방식을 고른 드문 경우는 여기서 풀 수 없으며, 그때는 안내가 뜹니다.</li>
       <li>열쇠말에서 열쇠를 빚는 데 PBKDF2 이십만 번을 돌립니다. 반 초쯤 걸리는 것은 느린 것이
@@ -402,9 +425,13 @@
   var modeField = $('modeField'), go = $('go');
   var result = $('result'), output = $('output'), outputLabel = $('outputLabel');
   var stats = $('stats'), note = $('note'), errorBox = $('error'), copy = $('copy');
+  var segWrap = $('segWrap'), segHan = $('segHan'), segB85 = $('segB85');
 
   var mode = 'enc';
   var lastToken = '';   // 화면에는 다섯 자씩 끊어 보이지만, 베낄 때는 원본 그대로
+  var lastBlob = null;  // 표기를 바꿀 때 다시 암호화하지 않으려고 들고 있는다
+  var lastMs = 0;
+  var encoding = 'han'; // 'han'(한글) | 'b85'(base85)
 
   function setMode(next) {
     mode = next;
@@ -417,6 +444,7 @@
     outputLabel.textContent = enc ? '봉인된 글' : '풀어낸 글';
     output.classList.toggle('cipher', enc);
     modeField.style.display = enc ? '' : 'none';
+    segWrap.style.display = enc ? '' : 'none';
     go.textContent = enc ? '봉인하기' : '해독하기';
     pw.placeholder = enc ? '비워 두면 자물쇠 없이 눌러 담기만 합니다' : '봉인할 때 쓴 열쇠말';
     hide();
@@ -463,6 +491,32 @@
     return new Promise(function (r) { requestAnimationFrame(function () { setTimeout(r, 0); }); });
   }
 
+  // 봉인 결과를 현재 표기로 다시 그린다 (다시 암호화하지 않는다)
+  function renderSealed() {
+    if (!lastBlob) return;
+    var token = encoding === 'han' ? HC.toHangul(lastBlob) : HC.toToken(lastBlob);
+    lastToken = token;
+    output.value = group(token);
+    note.textContent = encoding === 'han'
+      ? '한글 음절 하나에 13비트를 담았습니다. 다섯 자씩 끊어 두었고, 공백은 버리고 읽습니다.'
+      : '영문·숫자만 받는 곳에 붙일 때 쓰십시오. 공백은 버리고 읽습니다.';
+    var rawLen = new TextEncoder().encode(inputText.value).length;
+    var other = encoding === 'han' ? HC.toToken(lastBlob).length : HC.toHangul(lastBlob).length;
+    stats.innerHTML =
+      '원문 <b>' + rawLen + '자</b>' +
+      '　→　봉인 <b>' + lastBlob.length + '자</b>' +
+      (rawLen ? '　(<b>' + Math.round(lastBlob.length / rawLen * 100) + '%</b>)' : '') +
+      '　·　<b>' + token.length + '글자</b>' +
+      '<span class="alt"> (' + (encoding === 'han' ? '영문이면' : '한글이면') +
+      ' ' + other + '글자)</span>' +
+      '　·　<b>' + lastMs + 'ms</b>';
+    segHan.setAttribute('aria-pressed', String(encoding === 'han'));
+    segB85.setAttribute('aria-pressed', String(encoding === 'b85'));
+  }
+
+  segHan.onclick = function () { encoding = 'han'; renderSealed(); };
+  segB85.onclick = function () { encoding = 'b85'; renderSealed(); };
+
   async function run() {
     hide();
     var text = inputText.value;
@@ -478,20 +532,13 @@
     var t0 = performance.now();
     try {
       if (mode === 'enc') {
-        var blob = await HC.encrypt(text, password, MODE_OPTS[selectedMode()]);
-        var token = HC.toToken(blob);
-        var rawLen = new TextEncoder().encode(text).length;
-        lastToken = token;
-        output.value = group(token);
-        note.textContent = '다섯 자씩 끊어 두었습니다. 공백은 버리고 읽으므로 이대로 옮겨도 됩니다.';
-        stats.innerHTML =
-          '원문 <b>' + rawLen + '자</b>' +
-          '　→　봉인 <b>' + blob.length + '자</b>' +
-          (rawLen ? '　(<b>' + Math.round(blob.length / rawLen * 100) + '%</b>)' : '') +
-          '　·　암호문 <b>' + token.length + '자</b>' +
-          '　·　<b>' + Math.round(performance.now() - t0) + 'ms</b>';
+        lastBlob = await HC.encrypt(text, password, MODE_OPTS[selectedMode()]);
+        lastMs = Math.round(performance.now() - t0);
+        renderSealed();
       } else {
-        var plain = await HC.decrypt(HC.fromToken(text), password);
+        // 한글이든 영문이든 알아서 가려 읽는다
+        var plain = await HC.decrypt(HC.decodeToken(text), password);
+        lastBlob = null;
         lastToken = plain;
         output.value = plain;
         note.textContent = '';

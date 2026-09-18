@@ -38,36 +38,46 @@ def main():
     print('테스트 벡터 생성 중 (Python)...')
     vectors = {'compress': [], 'token': [], 'decrypt': [], 'encrypt': []}
 
+    # 압축기는 v1·v2 양쪽 모두 바이트까지 같아야 한다
     for s in SAMPLES:
         raw = s.encode('utf-8')
         vectors['compress'].append({
             'text': s,
-            'cm': base64.b64encode(hc.cm_compress(raw)).decode(),
+            'cm': base64.b64encode(hc.cm_compress(raw, hc.CFG_V1)).decode(),
+            'cm2': base64.b64encode(hc.cm_compress(raw, hc.CFG_V2)).decode(),
         })
 
     # base85 벡터: 길이 % 4 가 0/1/2/3 인 경우를 모두 포함시킨다
-    for n in (0, 1, 2, 3, 4, 5, 7, 11, 64):
+    # 한글 벡터: 13비트 경계(13바이트마다)를 넘나드는 길이를 포함시킨다
+    for n in (0, 1, 2, 3, 4, 5, 7, 11, 12, 13, 14, 25, 26, 27, 64):
         blob = bytes((i * 37 + 11) & 255 for i in range(n))
         vectors['token'].append({
             'blob': base64.b64encode(blob).decode(),
             'token': hc.to_token(blob),
+            'hangul': hc.to_hangul(blob),
         })
 
     # Python이 암호화 → JS가 복호화. lzma를 고르면 JS가 못 푸니 cm/raw로 강제한다.
     for s in SAMPLES:
-        for pw, opts in (('테스트pw', {}), (None, {}),
-                         ('pw', {'seed_len': 0, 'tag_len': 0}),
-                         ('pw', {'seed_len': 8, 'tag_len': 16})):
-            blob = hc.encrypt(s, pw, method='auto' if len(s) < 100 else 'cm', **opts)
-            if blob[0] & 3 == 2:      # lzma가 이긴 경우는 cm으로 다시 만든다
-                blob = hc.encrypt(s, pw, method='cm', **opts)
-            vectors['decrypt'].append({
-                'text': s, 'password': pw, 'token': hc.to_token(blob),
-            })
+        for ver in (1, 2):
+            for pw, opts in (('테스트pw', {}), (None, {}),
+                             ('pw', {'seed_len': 0, 'tag_len': 0}),
+                             ('pw', {'seed_len': 8, 'tag_len': 16})):
+                blob = hc.encrypt(s, pw, version=ver,
+                                  method='auto' if len(s) < 100 else 'cm', **opts)
+                if blob[0] & 3 == 2:      # lzma가 이긴 경우는 cm으로 다시 만든다
+                    blob = hc.encrypt(s, pw, version=ver, method='cm', **opts)
+                # 한글 표기와 base85 표기를 번갈아 보낸다 (JS가 둘 다 읽어야 한다)
+                enc = hc.to_hangul if ver == 2 else hc.to_token
+                vectors['decrypt'].append({
+                    'text': s, 'password': pw, 'token': enc(blob), 'version': ver,
+                })
 
     for s in SAMPLES:
         vectors['encrypt'].append({'text': s, 'password': '왕복-pw'})
         vectors['encrypt'].append({'text': s, 'password': None})
+        vectors['encrypt'].append({'text': s, 'password': 'v1-pw',
+                                   'opts': {'version': 1}})
     vectors['encrypt'].append({'text': '최소 모드', 'password': 'pw',
                                'opts': {'seedLen': 0, 'tagLen': 0}})
     vectors['encrypt'].append({'text': '강화 모드', 'password': 'pw',
@@ -91,7 +101,7 @@ def main():
             produced = json.loads(out_path.read_text(encoding='utf-8'))['produced']
             for item in produced:
                 try:
-                    got = hc.decrypt(hc.from_token(item['token']), item['password'])
+                    got = hc.decrypt(hc.decode_token(item['token']), item['password'])
                     ok = got == item['text']
                     note = '' if ok else f'  (받은 값: {got[:30]!r})'
                 except Exception as e:

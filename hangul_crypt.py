@@ -86,50 +86,130 @@ for _j in range(_p, 4096):
 _RATE = array('i', [int(65536 * 2.0 / (c + 2.0)) for c in range(64)])
 _LIMIT = 60
 
-ORDERS = [0, 1, 2, 3, 4, 6, 8]      # 직전 n바이트 문맥 (한글 1글자 = 3바이트)
-NM = len(ORDERS) + 1                 # + 단어 모델
 _BITS = 20
 _MASK = (1 << _BITS) - 1
+_M32 = 0xFFFFFFFF
 _M64 = (1 << 64) - 1
 _MULT = [0x9E3779B97F4A7C15, 0x85EBCA6B, 0xC2B2AE35, 0x27D4EB2F,
          0x165667B19E3779F9, 0x9E3779B1, 0xD6E8FEB8, 0xA0761D6478BD642F]
+
+# v2가 쓰는 32비트 곱수 (JS의 Math.imul과 결과를 맞추기 위해 하위 32비트만 쓴다)
+_MULT32 = [0x7F4A7C15, 0x85EBCA6B, 0xC2B2AE35, 0x27D4EB2F,
+           0x9E3779F9, 0x9E3779B1, 0xD6E8FEB8, 0x78BD642F,
+           0x1B873593, 0xCC9E2D51, 0xE6546B64, 0x9E3779B9]
+
+
+def _fin(x):
+    """눈사태 마무리 — 상위 비트를 하위로 끌어내린다.
+
+    v1의 해시는 (이력 & 마스크) * 곱수 의 하위 20비트만 썼다. 곱셈의 하위 비트는
+    피연산자의 하위 비트에만 의존하므로 3바이트 너머의 이력이 해시에 전혀
+    반영되지 않았고, 차수 4·6·8 모델이 차수 2.5 모델과 같은 것을 보고 있었다.
+    이 마무리 단계가 그 결함을 없앤다.
+    """
+    x &= _M32
+    x ^= x >> 16
+    x = (x * 0x7FEB352D) & _M32
+    x ^= x >> 15
+    x = (x * 0x846CA68B) & _M32
+    x ^= x >> 16
+    return x
+
+
+def _low(v, bits):
+    return v if bits >= 32 else (v & ((1 << bits) - 1))
+
+
+# 압축기 구성. 헤더 최상위 비트가 어느 쪽인지 가린다.
+#   v1 — 처음 배포한 구성. 이미 만들어 둔 암호문을 읽기 위해 그대로 남긴다.
+#   v2 — 해시 결함을 고치고, 차수를 짧은 쪽으로 다시 잡고, 건너뛰기 문맥과
+#        UTF-8 바이트 위치를 혼합기 문맥에 넣었다. held-out 기준 약 4.8% 더 짧다.
+class _Cfg:
+    __slots__ = ('orders', 'fixed', 'sparse', 'pos_mix', 'nm', 'nmix')
+
+    def __init__(self, orders, fixed, sparse=(), pos_mix=False):
+        self.orders = orders
+        self.fixed = fixed
+        self.sparse = sparse
+        self.pos_mix = pos_mix
+        self.nm = len(orders) + len(sparse) + 1      # + 단어 모델
+        self.nmix = 2048 if pos_mix else 512
+
+
+CFG_V1 = _Cfg([0, 1, 2, 3, 4, 6, 8], fixed=False)
+CFG_V2 = _Cfg([0, 1, 2, 3, 4, 5, 6], fixed=True, sparse=((1, 2),), pos_mix=True)
+
+ORDERS = CFG_V1.orders      # 이전 이름 유지
+NM = CFG_V1.nm
 
 
 class _Model:
     """여러 차수의 문맥 예측을 로지스틱 혼합으로 합치고 SSE로 보정한다."""
 
-    def __init__(self):
-        self.t = [array('H', [32768]) * (_MASK + 1) for _ in range(NM)]
-        self.n = [bytearray(_MASK + 1) for _ in range(NM)]
-        self.w = [array('i', [1 << 14]) * NM for _ in range(512)]
+    def __init__(self, cfg=CFG_V1):
+        self.cfg = cfg
+        nm = cfg.nm
+        self.nm = nm
+        self.t = [array('H', [32768]) * (_MASK + 1) for _ in range(nm)]
+        self.n = [bytearray(_MASK + 1) for _ in range(nm)]
+        self.w = [array('i', [1 << 14]) * nm for _ in range(cfg.nmix)]
         self.apm = array('H', [0]) * (1024 * 33)
         for c in range(1024):
             base = c * 33
             for j in range(33):
                 self.apm[base + j] = _squash((j - 16) * 128) * 16
-        self.h = [0] * NM
-        self.idx = [0] * NM
-        self.st = [0] * NM
+        self.h = [0] * nm
+        self.idx = [0] * nm
+        self.st = [0] * nm
         self.c0 = 1          # 현재 바이트의 이미 처리된 비트들 (선두 1 포함)
         self.hist = 0        # 직전 8바이트
         self.wh = 0          # 현재 단어 해시
+        self.pos = 0         # UTF-8 연속바이트 위치 (v2만 사용)
         self.pr = 2048
         self._ai = 0
         self._aw = 0
         self._set_ctx()
 
     def _set_ctx(self):
+        cfg = self.cfg
         h = self.hist
-        for i, o in enumerate(ORDERS):
-            self.h[i] = 0 if o == 0 else ((h & ((1 << (8 * o)) - 1)) * _MULT[i % 8]) & _M64
-        self.h[NM - 1] = (self.wh * 0x9E3779B97F4A7C15) & _M64
+        if not cfg.fixed:
+            for i, o in enumerate(cfg.orders):
+                self.h[i] = 0 if o == 0 else ((h & ((1 << (8 * o)) - 1)) * _MULT[i % 8]) & _M64
+            self.h[self.nm - 1] = (self.wh * 0x9E3779B97F4A7C15) & _M64
+            return
+
+        lo = h & _M32
+        hi = (h >> 32) & _M32
+        for i, o in enumerate(cfg.orders):
+            if o == 0:
+                self.h[i] = 0
+                continue
+            if o <= 4:
+                a, b = _low(lo, 8 * o), 0
+            else:
+                a, b = lo, _low(hi, 8 * (o - 4))
+            self.h[i] = _fin((a * _MULT32[i % 12]) & _M32
+                             ^ (((b + 0x165667B1) & _M32) * _MULT32[(i + 5) % 12]) & _M32) & _MASK
+        k = len(cfg.orders)
+        for s in cfg.sparse:
+            acc = 0x9E3779B9
+            for off in s:
+                acc = ((acc ^ ((lo >> (8 * off)) & 255)) * 0x85EBCA6B) & _M32
+            self.h[k] = _fin(acc) & _MASK
+            k += 1
+        self.h[k] = _fin((self.wh * 0x7F4A7C15) & _M32) & _MASK
+
+    def _mix_sel(self):
+        base = (self.c0 & 255) | (256 if self.hist & 128 else 0)
+        return base + 512 * self.pos if self.cfg.pos_mix else base
 
     def predict(self):
         c0 = self.c0
-        w = self.w[(c0 & 255) | (256 if self.hist & 128 else 0)]
+        w = self.w[self._mix_sel()]
         cm = c0 * 0x6F4F2F1F
         dot = 0
-        for i in range(NM):
+        for i in range(self.nm):
             j = (self.h[i] ^ cm) & _MASK
             self.idx[i] = j
             s = _STRETCH[self.t[i][j] >> 4]
@@ -156,9 +236,9 @@ class _Model:
         self.apm[i0] += ((g - self.apm[i0]) * (128 - wt)) >> 12
         self.apm[i0 + 1] += ((g - self.apm[i0 + 1]) * wt) >> 12
         err = ((bit << 12) - self.pr) * 10
-        w = self.w[(self.c0 & 255) | (256 if self.hist & 128 else 0)]
+        w = self.w[self._mix_sel()]
         tgt = bit << 16
-        for i in range(NM):
+        for i in range(self.nm):
             w[i] += (self.st[i] * err) >> 13
             j = self.idx[i]
             t = self.t[i]; n = self.n[i]
@@ -170,9 +250,15 @@ class _Model:
             b = self.c0 & 255
             self.hist = ((self.hist << 8) | b) & _M64
             if b >= 128 or 48 <= b <= 57 or 65 <= b <= 122:
-                self.wh = (self.wh * 0x2F0FD693 + b + 1) & _M64
+                self.wh = (self.wh * 0x2F0FD693 + b + 1) & (_M32 if self.cfg.fixed else _M64)
             else:
                 self.wh = 0
+            if self.cfg.pos_mix:
+                if b < 0x80:     self.pos = 0
+                elif b >= 0xF0:  self.pos = 3
+                elif b >= 0xE0:  self.pos = 2
+                elif b >= 0xC0:  self.pos = 1
+                else:            self.pos = self.pos - 1 if self.pos > 0 else 0
             self.c0 = 1
             self._set_ctx()
 
@@ -229,8 +315,8 @@ class _Decoder:
         return bit
 
 
-def _primed_model():
-    m = _Model()
+def _primed_model(cfg=CFG_V1):
+    m = _Model(cfg)
     for byte in CORPUS_BYTES:
         for k in (7, 6, 5, 4, 3, 2, 1, 0):
             m.predict()
@@ -238,8 +324,8 @@ def _primed_model():
     return m
 
 
-def cm_compress(data: bytes) -> bytes:
-    m = _primed_model()
+def cm_compress(data: bytes, cfg=CFG_V1) -> bytes:
+    m = _primed_model(cfg)
     e = _Encoder()
     for byte in data:
         for k in (7, 6, 5, 4, 3, 2, 1, 0):
@@ -248,8 +334,8 @@ def cm_compress(data: bytes) -> bytes:
     return e.flush()
 
 
-def cm_decompress(blob: bytes, n: int) -> bytes:
-    m = _primed_model()
+def cm_decompress(blob: bytes, n: int, cfg=CFG_V1) -> bytes:
+    m = _primed_model(cfg)
     d = _Decoder(blob)
     out = bytearray()
     for _ in range(n):
@@ -346,16 +432,18 @@ def _read_varint(data, i):
 
 
 def encrypt(text: str, password: str = None, *, seed_len=6, tag_len=4,
-            method='auto') -> bytes:
+            method='auto', version=2) -> bytes:
     import lzma
     raw = text.encode('utf-8')
+    if version not in (1, 2): raise ValueError('버전은 1 또는 2')
+    cfg = CFG_V2 if version == 2 else CFG_V1
 
     # --- 압축 방식 선택: 셋 다 해보고 가장 짧은 것을 고른다 ---
     cands = []
     if method in ('auto', 'raw'):
         cands.append((0, raw))
     if method in ('auto', 'cm'):
-        cands.append((1, cm_compress(raw)))
+        cands.append((1, cm_compress(raw, cfg)))
     if method in ('auto', 'lzma'):
         cands.append((2, lzma.compress(raw, preset=9 | lzma.PRESET_EXTREME)))
     mid, body = min(cands, key=lambda p: len(p[1]))
@@ -372,7 +460,8 @@ def encrypt(text: str, password: str = None, *, seed_len=6, tag_len=4,
     ct = chacha20(ekey, b'\0' * 12, payload)
 
     hdr = bytes([mid | (_SEED_OPT.index(seed_len) << 2) |
-                 (_TAG_OPT.index(tag_len) << 4) | (0x40 if keyed else 0)])
+                 (_TAG_OPT.index(tag_len) << 4) | (0x40 if keyed else 0) |
+                 (0x80 if version == 2 else 0)])
     blob = hdr + seed + ct
     if tag_len:
         blob += hmac.new(akey, blob, hashlib.sha256).digest()[:tag_len]
@@ -387,6 +476,7 @@ def decrypt(blob: bytes, password: str = None) -> str:
     seed_len = _SEED_OPT[(hdr >> 2) & 3]
     tag_len = _TAG_OPT[(hdr >> 4) & 3]
     keyed = bool(hdr & 0x40)
+    cfg = CFG_V2 if hdr & 0x80 else CFG_V1
     if mid == 3:
         raise ValueError('알 수 없는 형식입니다.')
     if keyed and password is None:
@@ -412,13 +502,24 @@ def decrypt(blob: bytes, password: str = None) -> str:
     else:
         n, j = _read_varint(payload, 0)
         body = payload[j:]
-        raw = cm_decompress(body, n) if mid == 1 else lzma.decompress(body)
+        raw = cm_decompress(body, n, cfg) if mid == 1 else lzma.decompress(body)
         if len(raw) != n:
             raise ValueError('복호화 실패: 길이가 맞지 않습니다.')
     return raw.decode('utf-8')
 
 
-# ---- 텍스트로 주고받기 위한 인코딩 (base85, 붙여넣기 안전) ----
+# ════════════════════════════════════════════════════════════════════
+#  5. 텍스트로 주고받기 위한 인코딩
+#
+#     base85 — 4바이트를 5글자로 부풀린다 (1.25글자/바이트).
+#     한글   — 음절 U+AC00..U+D7A3 은 11172자다. 그 중 8192자(2^13)만 쓰면
+#              한 글자에 정확히 13비트가 들어간다 (0.62글자/바이트).
+#              같은 내용을 절반 길이로 옮길 수 있다.
+#
+#     길이 되찾기: 글자 수 S에서 원래 바이트 수 N을 구할 때 후보가 둘(N, N+1)
+#     생길 수 있다. 두 후보는 13으로 나눈 나머지가 반드시 다르므로, 맨 앞에
+#     (N mod 13)을 담은 표시 글자 하나를 붙이면 모호함이 사라진다.
+# ════════════════════════════════════════════════════════════════════
 def to_token(blob: bytes) -> str:
     return base64.b85encode(blob).decode('ascii')
 
@@ -426,8 +527,74 @@ def from_token(token: str) -> bytes:
     return base64.b85decode(''.join(token.split()))
 
 
+_HAN_BASE = 0xAC00      # '가'
+_HAN_DATA = 8192        # 자료용 코드 0..8191
+_HAN_MARK = _HAN_DATA   # 표시용 코드 8192..8204
+
+
+def to_hangul(blob: bytes) -> str:
+    n = len(blob)
+    out = [chr(_HAN_BASE + _HAN_MARK + (n % 13))]
+    acc = nbits = 0
+    for b in blob:
+        acc = (acc << 8) | b
+        nbits += 8
+        while nbits >= 13:
+            nbits -= 13
+            out.append(chr(_HAN_BASE + (acc >> nbits)))
+            acc &= (1 << nbits) - 1
+    if nbits:
+        out.append(chr(_HAN_BASE + (acc << (13 - nbits))))   # 남는 비트는 0으로
+    return ''.join(out)
+
+
+def from_hangul(text: str) -> bytes:
+    s = ''.join(text.split())
+    if not s:
+        raise ValueError('빈 글자열입니다.')
+    mark = ord(s[0]) - _HAN_BASE
+    if not (_HAN_MARK <= mark <= _HAN_MARK + 12):
+        raise ValueError('한글 암호문이 아닙니다.')
+    r = mark - _HAN_MARK
+    cnt = len(s) - 1
+
+    n = -1
+    for cand in range(max(0, (13 * (cnt - 1)) // 8), (13 * cnt) // 8 + 1):
+        if -(-8 * cand // 13) == cnt and cand % 13 == r:
+            n = cand
+            break
+    if n < 0:
+        raise ValueError('한글 암호문의 길이가 맞지 않습니다.')
+
+    out = bytearray()
+    acc = nbits = 0
+    for ch in s[1:]:
+        v = ord(ch) - _HAN_BASE
+        if not (0 <= v < _HAN_DATA):
+            raise ValueError(f'한글 암호문이 아닌 글자가 있습니다: {ch!r}')
+        acc = (acc << 13) | v
+        nbits += 13
+        while nbits >= 8 and len(out) < n:
+            nbits -= 8
+            out.append((acc >> nbits) & 255)
+            acc &= (1 << nbits) - 1
+    if len(out) != n:
+        raise ValueError('한글 암호문 복원에 실패했습니다.')
+    return bytes(out)
+
+
+def is_hangul_token(text: str) -> bool:
+    s = ''.join(text.split())
+    return bool(s) and _HAN_MARK <= (ord(s[0]) - _HAN_BASE) <= _HAN_MARK + 12
+
+
+def decode_token(text: str) -> bytes:
+    """한글이든 base85든 알아서 읽는다."""
+    return from_hangul(text) if is_hangul_token(text) else from_token(text)
+
+
 # ════════════════════════════════════════════════════════════════════
-#  5. CLI
+#  6. CLI
 # ════════════════════════════════════════════════════════════════════
 def _selftest():
     import lzma, zlib, bz2
@@ -441,16 +608,21 @@ def _selftest():
         '가' * 300,
         '',
     ]
-    print(f"{'원문':>6} {'gzip':>6} {'bz2':>6} {'xz':>6} {'이도구':>7} {'토큰':>6}  내용")
-    print('-' * 74)
+    print(f"{'원문':>6} {'gzip':>6} {'bz2':>6} {'xz':>6} {'v1':>5} {'v2':>5} "
+          f"{'base85':>7} {'한글':>5}  내용")
+    print('-' * 86)
     ok = True
     for s in samples:
         raw = s.encode('utf-8')
-        blob = encrypt(s, 'test-비밀번호')
+        blob1 = encrypt(s, 'test-비밀번호', version=1)
+        blob = encrypt(s, 'test-비밀번호')          # 기본은 v2
         tok = to_token(blob)
+        han = to_hangul(blob)
         try:
-            back = decrypt(from_token(tok), 'test-비밀번호')
-            good = (back == s)
+            # 한글·base85 양쪽 표기, v1·v2 양쪽 형식을 모두 읽을 수 있어야 한다
+            good = (decrypt(decode_token(han), 'test-비밀번호') == s
+                    and decrypt(decode_token(tok), 'test-비밀번호') == s
+                    and decrypt(blob1, 'test-비밀번호') == s)
         except Exception as e:
             good = False; print('  오류:', e)
         ok &= good
@@ -458,7 +630,8 @@ def _selftest():
         b = len(bz2.compress(raw, 9)) if raw else 0
         x = len(lzma.compress(raw, preset=9)) if raw else 0
         mark = '' if good else '  ← 실패!'
-        print(f'{len(raw):6d} {g:6d} {b:6d} {x:6d} {len(blob):7d} {len(tok):6d}  {s[:24]!r}{mark}')
+        print(f'{len(raw):6d} {g:6d} {b:6d} {x:6d} {len(blob1):5d} {len(blob):5d} '
+              f'{len(tok):7d} {len(han):5d}  {s[:20]!r}{mark}')
     # 변조 감지
     blob = bytearray(encrypt('테스트 메시지입니다', 'pw'))
     blob[-1] ^= 1
@@ -470,6 +643,17 @@ def _selftest():
         decrypt(encrypt('테스트', 'pw1'), 'pw2'); print('틀린 비밀번호 거부 실패!'); ok = False
     except ValueError:
         print('틀린 비밀번호 거부: 정상')
+
+    # 한글 표기 왕복 (모든 길이에서 바이트 수를 정확히 되찾아야 한다)
+    han_ok = True
+    for n in range(0, 120):
+        blob = bytes((i * 37 + 11) & 255 for i in range(n))
+        try:
+            if from_hangul(to_hangul(blob)) != blob: han_ok = False
+        except Exception:
+            han_ok = False
+    print('한글 표기 왕복(0~119바이트):', '정상' if han_ok else '실패!')
+    ok &= han_ok
     print('\n전체 결과:', '통과' if ok else '실패')
     return 0 if ok else 1
 
@@ -490,6 +674,10 @@ def main(argv=None):
             p.add_argument('--strong', action='store_true',
                            help='강화 모드 (논스 12B, 태그 16B)')
             p.add_argument('--binary', action='store_true', help='토큰 대신 원시 바이트로 출력')
+            p.add_argument('--base85', action='store_true',
+                           help='한글 대신 base85로 출력 (영문만 받는 곳에 붙일 때)')
+            p.add_argument('--v1', action='store_true',
+                           help='옛 압축기(v1)로 만든다 — 보통 쓸 일 없음')
     sub.add_parser('selftest', help='자체 검증 및 압축률 비교')
 
     a = ap.parse_args(argv)
@@ -509,19 +697,26 @@ def main(argv=None):
         if a.min:    kw = dict(seed_len=0, tag_len=0)
         if a.strong: kw = dict(seed_len=8, tag_len=16)
         t0 = time.time()
-        blob = encrypt(text, a.key, **kw)
+        blob = encrypt(text, a.key, version=1 if a.v1 else 2, **kw)
         dt = time.time() - t0
+        encode = to_token if a.base85 else to_hangul
         if a.outfile:
             mode_bin = a.binary or a.outfile.endswith(('.bin', '.hgc'))
-            with open(a.outfile, 'wb') as f:
-                f.write(blob if mode_bin else to_token(blob).encode())
+            if mode_bin:
+                with open(a.outfile, 'wb') as f:
+                    f.write(blob)
+            else:
+                # newline='' — 윈도우에서 \n 이 \r\n 으로 바뀌면 안 된다
+                with open(a.outfile, 'w', encoding='utf-8', newline='') as f:
+                    f.write(encode(blob))
             print(f'{a.outfile} 저장됨', file=sys.stderr)
         elif a.binary:
             sys.stdout.buffer.write(blob)
         else:
-            print(to_token(blob))
+            print(encode(blob))
         r = len(blob) / max(1, len(data))
-        print(f'[원문 {len(data)}B → {len(blob)}B  ({r:.1%}, {dt:.1f}초)]', file=sys.stderr)
+        print(f'[원문 {len(data)}B → {len(blob)}B  ({r:.1%}, {dt:.1f}초, '
+              f'{len(encode(blob))}글자)]', file=sys.stderr)
     else:
         text = None
         errs = []
@@ -535,7 +730,9 @@ def main(argv=None):
                   file=sys.stderr)
             return 1
         if a.outfile:
-            open(a.outfile, 'w', encoding='utf-8').write(text)
+            # newline='' — 윈도우에서 \n 이 \r\n 으로 바뀌면 원문과 달라진다
+            with open(a.outfile, 'w', encoding='utf-8', newline='') as f:
+                f.write(text)
             print(f'{a.outfile} 저장됨', file=sys.stderr)
         else:
             print(text)
@@ -543,11 +740,21 @@ def main(argv=None):
 
 
 def _input_candidates(data: bytes):
-    """입력이 base85 토큰인지 원시 바이트인지 모를 때 둘 다 시도한다."""
+    """입력이 한글 토큰인지 base85인지 원시 바이트인지 모를 때 차례로 시도한다."""
     try:
-        yield from_token(data.decode('ascii').strip())
+        text = data.decode('utf-8').strip()
     except Exception:
-        pass
+        text = None
+    if text:
+        if is_hangul_token(text):
+            try:
+                yield from_hangul(text)
+            except Exception:
+                pass
+        try:
+            yield from_token(text)
+        except Exception:
+            pass
     yield data
 
 
