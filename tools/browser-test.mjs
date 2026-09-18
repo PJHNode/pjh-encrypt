@@ -203,6 +203,8 @@ async function runEngine(name) {
                                    document.getElementById('keyError').classList.contains('show'));
   const myPub = (await $('myPub').inputValue()).replace(/\s/g, '');
   check(myPub.length === 23, '내 열쇠 만들기 (공개키 ' + myPub.length + '자)');
+  // 지문은 화면이 뜬 뒤 비동기로 채워진다
+  await page.waitForFunction(() => /지문 \S+ \S+/.test(document.getElementById('myFp').textContent));
   const myFp = (await $('myFp').textContent()).match(/지문 (\S+ \S+)/);
   const fpFromPy = py(`import sys, hangul_crypt as hc; print(hc.key_fingerprint(sys.stdin.read().strip()), end='')`, myPub);
   check(myFp && myFp[1] === fpFromPy, '지문이 Python과 같음 (' + (myFp && myFp[1]) + ')');
