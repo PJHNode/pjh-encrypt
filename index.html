@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>한글 암호화</title>
+<meta name="description" content="한글 텍스트를 잘게 압축해서 암호화하는 도구. 모든 처리는 브라우저 안에서만 이루어집니다.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔐</text></svg>">
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --surface: #ffffff;
+    --surface-2: #f0f2f5;
+    --border: #dfe3e8;
+    --text: #1a1d21;
+    --text-dim: #656d76;
+    --accent: #2f6feb;
+    --accent-text: #ffffff;
+    --danger: #c9372c;
+    --ok: #1a7f37;
+    --radius: 10px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --surface-2: #1c2129;
+      --border: #30363d;
+      --text: #e6edf3;
+      --text-dim: #8d96a0;
+      --accent: #4c8bf5;
+      --accent-text: #0d1117;
+      --danger: #f85149;
+      --ok: #3fb950;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0d1117; --surface: #161b22; --surface-2: #1c2129; --border: #30363d;
+    --text: #e6edf3; --text-dim: #8d96a0; --accent: #4c8bf5; --accent-text: #0d1117;
+    --danger: #f85149; --ok: #3fb950;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+    line-height: 1.6;
+    -webkit-text-size-adjust: 100%;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; padding: 32px 16px 64px; }
+
+  header { margin-bottom: 24px; }
+  h1 { font-size: 1.5rem; margin: 0 0 6px; letter-spacing: -0.01em; }
+  header p { margin: 0; color: var(--text-dim); font-size: 0.9rem; }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+  }
+
+  .tabs { display: flex; gap: 4px; margin-bottom: 16px; background: var(--surface-2);
+          padding: 4px; border-radius: var(--radius); }
+  .tabs button {
+    flex: 1; padding: 9px 12px; border: 0; border-radius: 7px; cursor: pointer;
+    background: transparent; color: var(--text-dim); font: inherit; font-size: 0.92rem;
+    font-weight: 600;
+  }
+  .tabs button[aria-selected="true"] { background: var(--surface); color: var(--text);
+                                        box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+
+  label { display: block; font-size: 0.82rem; font-weight: 600; color: var(--text-dim);
+          margin-bottom: 6px; }
+  .field { margin-bottom: 16px; }
+
+  textarea, input[type="text"], input[type="password"] {
+    width: 100%; padding: 11px 12px; border: 1px solid var(--border);
+    border-radius: 8px; background: var(--bg); color: var(--text);
+    font: inherit; font-size: 0.95rem; resize: vertical;
+  }
+  textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: -1px;
+                                border-color: transparent; }
+  textarea { min-height: 120px; }
+  #inputText.token, #output { font-family: var(--mono); font-size: 0.86rem; word-break: break-all; }
+
+  .pw-row { display: flex; gap: 8px; }
+  .pw-row input { flex: 1; }
+  .ghost {
+    padding: 0 12px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--surface-2); color: var(--text-dim); font: inherit;
+    font-size: 0.82rem; cursor: pointer; white-space: nowrap;
+  }
+  .ghost:hover { color: var(--text); }
+
+  .modes { display: flex; gap: 8px; flex-wrap: wrap; }
+  .modes label {
+    flex: 1; min-width: 140px; margin: 0; padding: 10px 12px; cursor: pointer;
+    border: 1px solid var(--border); border-radius: 8px; background: var(--bg);
+    font-weight: 500; color: var(--text);
+  }
+  .modes label:has(input:checked) { border-color: var(--accent);
+                                    box-shadow: inset 0 0 0 1px var(--accent); }
+  .modes input { margin-right: 7px; accent-color: var(--accent); }
+  .modes .hint { display: block; margin-left: 22px; font-size: 0.75rem;
+                 color: var(--text-dim); font-weight: 400; }
+
+  .go {
+    width: 100%; padding: 13px; border: 0; border-radius: 8px;
+    background: var(--accent); color: var(--accent-text);
+    font: inherit; font-size: 0.98rem; font-weight: 700; cursor: pointer;
+  }
+  .go:disabled { opacity: 0.55; cursor: progress; }
+
+  #result { margin-top: 20px; display: none; }
+  #result.show { display: block; }
+  .result-head { display: flex; justify-content: space-between; align-items: center;
+                 gap: 12px; margin-bottom: 6px; }
+  .result-head label { margin: 0; }
+  #output { min-height: 90px; }
+
+  .stats { margin-top: 10px; font-size: 0.8rem; color: var(--text-dim);
+           font-variant-numeric: tabular-nums; }
+  .stats b { color: var(--text); font-weight: 600; }
+
+  .msg { margin-top: 16px; padding: 11px 13px; border-radius: 8px; font-size: 0.87rem;
+         display: none; border: 1px solid; }
+  .msg.show { display: block; }
+  .msg.error { color: var(--danger); border-color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, transparent); }
+
+  footer { margin-top: 32px; font-size: 0.8rem; color: var(--text-dim); }
+  footer h2 { font-size: 0.85rem; color: var(--text); margin: 0 0 8px; }
+  footer ul { margin: 0; padding-left: 18px; }
+  footer li { margin-bottom: 5px; }
+  footer a { color: var(--accent); }
+  code { font-family: var(--mono); font-size: 0.92em; background: var(--surface-2);
+         padding: 1px 5px; border-radius: 4px; }
+
+  @media (max-width: 480px) {
+    .wrap { padding: 20px 16px 48px; }
+    .modes label { min-width: 100%; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>🔐 한글 암호화</h1>
+    <p>한글 텍스트를 잘게 압축해서 암호화합니다. 모든 처리는 이 브라우저 안에서만 이루어지며,
+       입력한 내용과 비밀번호는 어디로도 전송되지 않습니다.</p>
+  </header>
+
+  <div class="card">
+    <div class="tabs" role="tablist">
+      <button role="tab" id="tab-enc" aria-selected="true">암호화</button>
+      <button role="tab" id="tab-dec" aria-selected="false">복호화</button>
+    </div>
+
+    <div class="field">
+      <label for="inputText" id="inputLabel">숨길 내용</label>
+      <textarea id="inputText" placeholder="여기에 입력하세요" spellcheck="false"></textarea>
+    </div>
+
+    <div class="field">
+      <label for="pw">비밀번호</label>
+      <div class="pw-row">
+        <input type="password" id="pw" placeholder="비워두면 암호 보호 없이 압축만 합니다"
+               autocomplete="off" spellcheck="false">
+        <button type="button" class="ghost" id="pwToggle" aria-label="비밀번호 표시">표시</button>
+      </div>
+    </div>
+
+    <div class="field" id="modeField">
+      <label>모드</label>
+      <div class="modes">
+        <label>
+          <input type="radio" name="mode" value="normal" checked>기본
+          <span class="hint">오버헤드 11B · 변조 감지</span>
+        </label>
+        <label>
+          <input type="radio" name="mode" value="min">최소
+          <span class="hint">오버헤드 1B · 변조 감지 없음</span>
+        </label>
+        <label>
+          <input type="radio" name="mode" value="strong">강화
+          <span class="hint">오버헤드 25B · 태그 16B</span>
+        </label>
+      </div>
+    </div>
+
+    <button class="go" id="go">암호화</button>
+
+    <div id="result">
+      <div class="result-head">
+        <label for="output" id="outputLabel">결과 토큰</label>
+        <button type="button" class="ghost" id="copy">복사</button>
+      </div>
+      <textarea id="output" readonly spellcheck="false"></textarea>
+      <div class="stats" id="stats"></div>
+    </div>
+
+    <div class="msg error" id="error"></div>
+  </div>
+
+  <footer>
+    <h2>알아두면 좋은 것</h2>
+    <ul>
+      <li><b>최소 모드</b>는 가장 짧지만 변조를 감지할 수 없고, 같은 내용이 항상 같은 결과가
+          됩니다. 정말 짧게 만들어야 할 때만 쓰세요.</li>
+      <li>비밀번호를 잊으면 <b>복구할 방법이 없습니다.</b> 서버에 아무것도 저장되지 않습니다.</li>
+      <li>여기서 만든 토큰은 Python 버전(<code>hangul_crypt.py</code>)으로도 그대로 풀립니다.
+          반대로 Python이 lzma 방식을 골라 만든 토큰은 브라우저에서 풀 수 없으며, 그때는
+          안내 메시지가 나옵니다.</li>
+      <li>비밀번호에서 키를 뽑는 데 PBKDF2 20만 회를 쓰기 때문에 처리에 0.5초쯤 걸립니다.
+          느린 게 아니라 일부러 느리게 만든 부분입니다.</li>
+      <li>소스와 설명: <a href="https://github.com/PJHNode/pjh-encrypt">github.com/PJHNode/pjh-encrypt</a></li>
+    </ul>
+  </footer>
+
+</div>
+
+<script src="hangul_crypt.js"></script>
+<script>
+(function () {
+  'use strict';
+  var HC = window.HangulCrypt;
+
+  var $ = function (id) { return document.getElementById(id); };
+  var tabEnc = $('tab-enc'), tabDec = $('tab-dec');
+  var inputText = $('inputText'), inputLabel = $('inputLabel');
+  var pw = $('pw'), pwToggle = $('pwToggle');
+  var modeField = $('modeField'), go = $('go');
+  var result = $('result'), output = $('output'), outputLabel = $('outputLabel');
+  var stats = $('stats'), errorBox = $('error'), copy = $('copy');
+
+  var mode = 'enc';
+
+  function setMode(next) {
+    mode = next;
+    var enc = mode === 'enc';
+    tabEnc.setAttribute('aria-selected', String(enc));
+    tabDec.setAttribute('aria-selected', String(!enc));
+    inputLabel.textContent = enc ? '숨길 내용' : '토큰 붙여넣기';
+    inputText.placeholder = enc ? '여기에 입력하세요' : '암호화해서 나온 토큰을 붙여넣으세요';
+    inputText.classList.toggle('token', !enc);
+    outputLabel.textContent = enc ? '결과 토큰' : '복호화된 내용';
+    output.classList.toggle('token', enc);
+    modeField.style.display = enc ? '' : 'none';
+    go.textContent = enc ? '암호화' : '복호화';
+    pw.placeholder = enc ? '비워두면 암호 보호 없이 압축만 합니다' : '암호화할 때 쓴 비밀번호';
+    hide();
+  }
+
+  tabEnc.onclick = function () { setMode('enc'); };
+  tabDec.onclick = function () { setMode('dec'); };
+
+  pwToggle.onclick = function () {
+    var showing = pw.type === 'text';
+    pw.type = showing ? 'password' : 'text';
+    pwToggle.textContent = showing ? '표시' : '숨김';
+  };
+
+  function hide() {
+    result.classList.remove('show');
+    errorBox.classList.remove('show');
+  }
+
+  function fail(message) {
+    result.classList.remove('show');
+    errorBox.textContent = message;
+    errorBox.classList.add('show');
+  }
+
+  var MODE_OPTS = {
+    normal: { seedLen: 6, tagLen: 4 },
+    min: { seedLen: 0, tagLen: 0 },
+    strong: { seedLen: 8, tagLen: 16 }
+  };
+
+  function selectedMode() {
+    return document.querySelector('input[name="mode"]:checked').value;
+  }
+
+  // 브라우저가 "처리 중" 상태를 먼저 그리도록 한 프레임 양보한다.
+  function nextFrame() {
+    return new Promise(function (r) { requestAnimationFrame(function () { setTimeout(r, 0); }); });
+  }
+
+  async function run() {
+    hide();
+    var text = inputText.value;
+    var password = pw.value ? pw.value : null;
+
+    if (mode === 'dec' && !text.trim()) { fail('복호화할 토큰을 입력하세요.'); return; }
+
+    go.disabled = true;
+    var label = go.textContent;
+    go.textContent = '처리 중…';
+    await nextFrame();
+
+    var t0 = performance.now();
+    try {
+      if (mode === 'enc') {
+        var blob = await HC.encrypt(text, password, MODE_OPTS[selectedMode()]);
+        var token = HC.toToken(blob);
+        var rawLen = new TextEncoder().encode(text).length;
+        output.value = token;
+        stats.innerHTML =
+          '원문 <b>' + rawLen + '바이트</b> → 암호문 <b>' + blob.length + '바이트</b>' +
+          (rawLen ? ' (<b>' + Math.round(blob.length / rawLen * 100) + '%</b>)' : '') +
+          ' · 토큰 <b>' + token.length + '자</b> · ' + Math.round(performance.now() - t0) + 'ms';
+      } else {
+        var plain = await HC.decrypt(HC.fromToken(text), password);
+        output.value = plain;
+        stats.innerHTML = '복호화 성공 · <b>' + plain.length + '자</b> · ' +
+          Math.round(performance.now() - t0) + 'ms';
+      }
+      result.classList.add('show');
+    } catch (e) {
+      fail(e && e.message ? e.message : String(e));
+    } finally {
+      go.disabled = false;
+      go.textContent = label;
+    }
+  }
+
+  go.onclick = run;
+
+  // Ctrl/Cmd + Enter 로 실행
+  inputText.addEventListener('keydown', function (e) {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); run(); }
+  });
+  pw.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); run(); }
+  });
+
+  copy.onclick = async function () {
+    try {
+      await navigator.clipboard.writeText(output.value);
+      copy.textContent = '복사됨';
+    } catch (e) {
+      output.select();
+      document.execCommand('copy');
+      copy.textContent = '복사됨';
+    }
+    setTimeout(function () { copy.textContent = '복사'; }, 1400);
+  };
+
+  setMode('enc');
+})();
+</script>
+</body>
+</html>

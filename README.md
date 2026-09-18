@@ -5,6 +5,11 @@
 한국어 코퍼스로 미리 예열한 문맥혼합(Context Mixing) 압축기를 쓰기 때문에,
 짧은 한글 문장에서도 gzip/bzip2/xz보다 훨씬 작게 줄어듭니다.
 
+**웹에서 바로 쓰기 → [pjhnode.github.io/pjh-encrypt](https://pjhnode.github.io/pjh-encrypt/)**
+
+Python 구현(`hangul_crypt.py`)과 JavaScript 구현(`hangul_crypt.js`)이 있으며, 둘은
+바이트 단위로 호환됩니다. 웹에서 만든 토큰을 CLI로 풀 수 있고 그 반대도 됩니다.
+
 ## 압축률 (selftest 실측, 단위 = 바이트)
 
 | 입력 | 원문 | gzip | bz2 | xz | **pjh-encrypt** |
@@ -58,6 +63,50 @@ token = to_token(blob)                      # 붙여넣기 안전한 base85 문�
 
 `method`는 `'auto'`(기본, 셋 다 해보고 최소 선택) / `'raw'` / `'cm'` / `'lzma'` 중 선택합니다.
 
+## 웹 페이지
+
+`index.html` + `hangul_crypt.js` 두 파일이 전부이며, 서버 없이 브라우저 안에서만 돌아갑니다.
+입력한 내용과 비밀번호는 어디로도 전송되지 않습니다.
+
+```html
+<script src="hangul_crypt.js"></script>
+<script>
+  const blob  = await HangulCrypt.encrypt('숨길 내용', '비밀번호');
+  const token = HangulCrypt.toToken(blob);
+  const 원문  = await HangulCrypt.decrypt(HangulCrypt.fromToken(token), '비밀번호');
+</script>
+```
+
+Node.js에서도 그대로 씁니다: `const HC = require('./hangul_crypt.js')`.
+
+PBKDF2·HMAC·SHA-256은 WebCrypto를 쓰기 때문에 함수가 비동기이고, **보안 컨텍스트(HTTPS
+또는 localhost)가 필요**합니다. `file://`로 열면 `crypto.subtle`이 없어 동작하지 않습니다.
+
+### Python 구현과의 차이
+
+브라우저에는 lzma 압축기가 없어 **압축 방식 후보에서 lzma를 제외**했습니다 (무압축과 CM만 사용).
+한글 텍스트는 거의 항상 CM이 이기므로 실질적인 손해는 없고, JS가 만든 토큰은 Python에서
+문제없이 풀립니다. 반대로 Python이 lzma를 골라 만든 드문 경우만 브라우저에서 풀 수 없으며,
+그때는 안내 메시지가 나옵니다.
+
+Python은 64비트 정수 연산을 임의정밀도로 하지만, 그 결과는 항상 하위 20비트(`_MASK`)만
+쓰입니다. 곱셈의 하위 비트는 피연산자의 하위 비트에만 의존하므로 JS는 `Math.imul`로
+하위 32비트만 계산해도 결과가 정확히 같습니다.
+
+### 호환성 검사
+
+```bash
+python tools/crosstest.py     # 양방향 호환성 검사 (node 필요)
+python tools/sync_corpus.py   # .py의 코퍼스를 .js로 복사
+```
+
+`crosstest.py`는 Python으로 테스트 벡터를 만들어 ① CM 압축기 출력이 바이트까지 같은지
+② base85 인코딩이 같은지 ③ Python→JS 복호화 ④ JS→Python 복호화를 모두 확인합니다.
+
+> 코퍼스는 두 구현이 반드시 같아야 합니다. `hangul_crypt.py`의 `CORPUS`를 고쳤다면
+> `tools/sync_corpus.py`를 실행해 JS 쪽을 맞추세요. JS에는 `\uXXXX`로 이스케이프되어
+> 들어가므로, 파일이 어떤 인코딩으로 해석되든 코퍼스 바이트는 달라지지 않습니다.
+
 ## 동작 방식
 
 **압축** — 프로그램 안에 약 10KB의 한국어 코퍼스(조사·어미·상용어·여러 문체의 글)가 들어 있고,
@@ -102,11 +151,26 @@ token = to_token(blob)                      # 붙여넣기 안전한 base85 문�
 - **코퍼스를 수정하면 이전에 암호화한 데이터를 풀 수 없습니다.** 코퍼스 지문이 키 유도에 섞여
   있어 인증 단계에서 걸러지며, 에러 메시지로 알려줍니다. 대신 본인 글로 코퍼스를 교체하면
   압축률은 더 올라갑니다.
-- **속도** — 예열 때문에 호출당 0.6초 정도 걸립니다. 수십 KB 이상 파일에서는 길이에 비례해
-  늘어납니다. 대용량이 목적이라면 예열 모델 상태를 캐시하는 방식으로 개선할 수 있습니다.
+- **속도** — 예열과 PBKDF2 20만 회 때문에 호출당 Python 0.6초, 브라우저 0.45초 정도
+  걸립니다. 수십 KB 이상 파일에서는 길이에 비례해 늘어납니다. JS는 예열 상태를 캐시하므로
+  두 번째 호출부터 예열 비용이 84ms → 16ms로 줄어듭니다.
+- 웹 페이지는 계산을 메인 스레드에서 하므로, 아주 긴 글을 넣으면 그동안 화면이 잠시
+  멈춥니다. 필요해지면 Web Worker로 옮기면 됩니다.
 - 순수 파이썬 구현이므로 타이밍 부채널 공격에는 방어하지 않습니다. 개인 메모·일기 수준의
   용도를 전제로 만들었습니다.
 
 ## 요구 사항
 
-Python 3.8+ (표준 라이브러리만 사용, 외부 의존성 없음)
+- **Python 3.8+** — 표준 라이브러리만 사용, 외부 의존성 없음
+- **브라우저** — WebCrypto를 지원하는 최신 브라우저, HTTPS 또는 localhost에서 접속
+- **호환성 검사에만** Node.js 18+
+
+## 파일
+
+| 파일 | 설명 |
+|---|---|
+| `hangul_crypt.py` | Python 구현 + CLI |
+| `hangul_crypt.js` | JavaScript 구현 (브라우저 / Node.js) |
+| `index.html` | 웹 페이지 UI |
+| `tools/crosstest.py`, `tools/crosstest.js` | Python ↔ JS 양방향 호환성 검사 |
+| `tools/sync_corpus.py` | 코퍼스를 .py → .js 로 동기화 |
