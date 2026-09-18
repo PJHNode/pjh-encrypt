@@ -4,19 +4,21 @@
 hangul_crypt.py — 한글 텍스트 초압축 + 암호화 도구
 
 설계 요약
-  1) 압축: 한국어 코퍼스로 미리 '예열'한 문맥혼합(Context Mixing) 산술부호화기.
+  1) 압축: 23KB 한국어 코퍼스로 미리 '예열'한 문맥혼합(Context Mixing) 산술부호화기.
            gzip/bzip2/xz보다 한국어에서 2~3배 더 짧다.
   2) 암호: ChaCha20 스트림 암호(순수 파이썬) + HMAC-SHA256 인증 태그.
            스트림 암호라 암호화해도 길이가 전혀 늘지 않는다.
   3) 키:   비밀번호 → PBKDF2-HMAC-SHA256(200,000회)로 키 유도.
+  4) 표기: 한글 음절 한 글자에 13비트를 담는다. base85(6.4비트/글자)의 절반 길이다.
 
 표준 라이브러리만 사용. 설치 불필요.
+hangul_crypt.js 와 바이트 단위로 호환된다 (tools/crosstest.py 가 검사).
 
 사용법
   python hangul_crypt.py enc -k 비밀번호 "숨길 내용"
-  python hangul_crypt.py dec -k 비밀번호 "출력된토큰"
-  python hangul_crypt.py enc -k pw -i 입력.txt -o 출력.bin
-  python hangul_crypt.py dec -k pw -i 출력.bin
+  python hangul_crypt.py dec -k 비밀번호 "출력된암호문"   # 한글·base85 자동 인식
+  python hangul_crypt.py enc -k pw --base85 "..."      # 영문만 받는 곳에 붙일 때
+  python hangul_crypt.py enc -k pw -i 입력.txt -o 출력.hgc
   python hangul_crypt.py selftest
 """
 
@@ -55,6 +57,57 @@ CORPUS = """\
 생각한다 느꼈다 알았다 몰랐다 배웠다 깨달았다 기억한다 잊었다 바란다 원한다 싫다 좋아한다 궁금하다 걱정된다 안심된다 기대된다 아쉽다 뿌듯하다 답답하다 편안하다 불안하다 즐겁다 지루하다 놀랍다 당황스럽다 고맙다 미안하다
 시작하다 끝내다 계속하다 멈추다 바꾸다 고치다 만들다 부수다 늘리다 줄이다 모으다 나누다 찾다 잃다 얻다 주다 받다 보내다 가져오다 올리다 내리다 열다 닫다 넣다 빼다 쌓다 옮기다 정리하다 준비하다 확인하다 결정하다 선택하다 포기하다 도전하다
 문제 해결 방법 과정 결과 원인 이유 목적 목표 계획 방향 기준 조건 상황 환경 관계 영향 변화 발전 성장 차이 공통점 특징 장점 단점 한계 가능성 필요성 중요성 의미 가치 기준 역할 책임 권리 의무 규칙 제도 정책 사회 문화 역사 경제 정치 교육 기술 과학 예술 언어 자연 인간
+지금 어디야 거의 다 왔어 오분이면 도착해 먼저 들어가 있어 자리 잡아놨어 입구에서 기다릴게 늦어서 미안 차가 너무 막혔어 다음에는 지하철 타야겠다 오늘 고마웠어 조심히 들어가 도착하면 연락 줘 잘 들어갔어 응 방금 도착 푹 쉬어 내일 봐
+이번 주말에 시간 괜찮아? 토요일 오후면 좋을 것 같은데 일요일도 상관없어 편한 시간 말해줘 나는 언제든 괜찮으니까 정해지면 알려줘 장소는 그때 정하자 중간쯤에서 보는 게 낫겠다 거기 주차 되나 모르겠네 대중교통이 편할 것 같아
+밥은 먹었어? 아직 안 먹었으면 같이 먹자 뭐 먹고 싶어 아무거나 상관없어 네가 정해 저번에 갔던 데 어때 거기 괜찮았잖아 그럼 거기로 하자 몇 시에 볼까 일곱 시쯤 어때 좋아 그때 보자
+어머니 생신 선물 뭐가 좋을까 고민이야 작년에는 스카프 드렸는데 올해는 다른 걸로 하고 싶어 같이 식사하는 게 제일 좋아하실 것 같기도 하고 형이랑 상의해봐야겠다 다들 시간 되는 날로 잡아서 모이자고 해야지
+아버지 병원 예약 다음 주 화요일 오전 열 시야 내가 모시고 갈게 검사 결과는 그날 바로 나온다고 했어 걱정하지 마시라고 말씀드렸는데 표정이 안 좋으시더라 결과 나오면 바로 연락할게
+동생이 시험 때문에 요즘 예민해 괜히 건드리지 말고 그냥 두자 끝나면 좀 나아지겠지 고생 많이 했으니까 끝나고 맛있는 거 사주려고 해 뭘 좋아하는지 물어봐야겠다
+할머니 댁에 다녀왔다. 마당에 감이 많이 열렸는데 따서 깎아 말려 두셨다고 하셨다. 가져가라고 한 봉지 챙겨 주셨다. 요즘 무릎이 아프셔서 멀리는 못 다니신다고 했다. 자주 찾아뵈어야겠다는 생각을 하면서도 막상 시간을 내기가 쉽지 않다.
+오늘 좀 힘들었어 별일은 아닌데 그냥 지치네 이야기 들어줘서 고마워 말하고 나니까 좀 나아졌어 내일은 괜찮아질 거야 너무 걱정하지 마 혼자 끙끙대지 말고 힘들면 말해 언제든 들어줄게
+축하해 진짜 잘됐다 그동안 고생한 거 아니까 더 기쁘다 한턱 쏴야겠는데 언제 시간 돼 날 잡자 다들 부르자 오랜만에 모이면 좋겠다
+안녕하세요. 지난번에 말씀드린 자료 정리해서 첨부합니다. 검토하시고 수정할 부분 있으면 알려 주시기 바랍니다. 초안이라 부족한 점이 많을 것 같습니다. 의견 주시면 반영해서 다시 보내 드리겠습니다. 감사합니다.
+말씀하신 일정은 확인했습니다. 다만 그 주에는 다른 일정이 있어 참석이 어려울 것 같습니다. 가능하시다면 다음 주로 옮길 수 있을지 여쭙고 싶습니다. 번거롭게 해 드려 죄송합니다. 조율이 어려우시면 회의록으로 대신 확인하겠습니다.
+회의 결과를 정리해 공유드립니다. 첫째, 일정은 기존 계획대로 진행하기로 했습니다. 둘째, 예산은 항목별로 재검토한 뒤 다음 회의에서 확정하기로 했습니다. 셋째, 담당자는 각 팀에서 한 명씩 지정해 이번 주 내로 알려 주시기 바랍니다.
+보고드립니다. 현재까지 진행률은 약 칠십 퍼센트이며, 예정된 일정보다 이틀 정도 앞서 있습니다. 다만 외부 업체 회신이 늦어지는 부분이 있어 다음 단계에서 지연될 가능성이 있습니다. 대비책을 함께 준비하고 있습니다.
+휴가 신청 관련 안내드립니다. 다음 달 휴가 계획은 이번 주 금요일까지 제출해 주시기 바랍니다. 같은 팀에서 중복되는 날짜가 있을 경우 조정이 필요하니 미리 상의해 주십시오. 승인 결과는 다음 주 초에 개별 안내드리겠습니다.
+계약서 검토 요청드립니다. 특히 삼 조 이 항의 위약금 조항과 오 조의 계약 해지 조건을 중점적으로 봐 주시면 감사하겠습니다. 서명 전에 반드시 확인이 필요한 사항입니다. 의견은 이번 주 목요일까지 부탁드립니다.
+계좌번호는 만나서 알려줄게 문자로 보내는 건 좀 그래 은행 앱에서 확인하는 게 나을 것 같아 입금하면 확인하고 연락할게 계좌 비밀번호나 인증번호는 누구에게도 알려주면 안 돼 은행에서는 절대 그런 걸 묻지 않아
+카드값이 이번 달에 생각보다 많이 나왔다. 명세서를 보니 구독 서비스가 여러 개 자동 결제되고 있었다. 안 쓰는 건 정리해야겠다. 매달 조금씩이라도 나가는 돈은 일 년이면 꽤 큰 금액이 된다.
+적금 만기가 다음 달인데 어떻게 할지 고민이다. 금리가 예전만 못해서 다시 넣기가 망설여진다. 일부는 비상금으로 두고 나머지만 다시 묶어 둘 생각이다. 무리하게 굴리기보다는 안전하게 가는 편이 낫겠다.
+비밀번호를 여기저기 같은 걸 쓰고 있었는데 바꾸기로 했다. 한 곳이 뚫리면 전부 위험해진다는 말을 듣고 나니 불안해졌다. 중요한 곳부터 하나씩 다르게 바꾸고 있다. 외우기 어려운 건 따로 적어서 안전한 곳에 두었다.
+새 집 비밀번호는 만나서 말해줄게 문 앞에 택배 오면 경비실에 맡겨 달라고 했어 열쇠는 하나 더 만들어서 어머니께 드렸어 혹시 모르니까
+오늘 아침에는 유난히 일어나기가 힘들었다. 알람을 세 번이나 미루다가 겨우 일어났다. 창밖은 아직 어둑했고 공기가 찼다. 따뜻한 물을 한 잔 마시고 나니 조금 정신이 들었다. 요즘 잠드는 시간이 자꾸 늦어져서 그런 것 같다.
+저녁에 혼자 걸었다. 특별히 목적지를 정하지 않고 그냥 걷다 보니 평소에 지나치던 골목까지 들어가게 됐다. 오래된 간판과 낡은 계단이 그대로 남아 있었다. 사람들이 사는 모습은 크게 달라지지 않았구나 싶었다.
+한동안 미뤄 두었던 책을 다시 펼쳤다. 절반쯤 읽다 만 채로 몇 달이 지났는데, 앞부분을 다시 훑으니 기억나는 문장이 꽤 있었다. 그때는 그냥 넘겼던 대목이 지금은 다르게 읽혔다. 같은 글도 읽는 시기에 따라 다르게 다가온다.
+일이 뜻대로 되지 않은 날이었다. 준비한 만큼 결과가 나오지 않으면 허탈해진다. 그래도 과정에서 배운 게 없지는 않았다. 다음에는 같은 실수를 반복하지 않으면 그걸로 충분하다고 생각하기로 했다.
+올해가 벌써 절반이나 지났다. 연초에 세운 계획을 다시 보니 지킨 것보다 못 지킨 것이 많다. 그래도 아예 손도 못 댄 건 아니어서 조금은 위안이 된다. 남은 기간에는 개수를 줄이고 하나라도 제대로 해 보려 한다.
+정부는 어제 관련 법안의 시행 시기를 내년 상반기로 미루기로 했다고 밝혔다. 준비 기간이 부족하다는 현장의 의견을 반영한 결정이다. 다만 시행이 늦어지면서 제도의 실효성이 떨어질 수 있다는 지적도 나온다.
+조사에 따르면 응답자의 절반 이상이 필요성에는 공감하지만 구체적인 방식에는 이견을 보였다. 특히 비용 부담 주체를 두고 의견이 크게 갈렸다. 연구진은 추가 조사를 통해 세부 방안을 마련할 계획이라고 밝혔다.
+지난달 소비자물가는 전년 같은 달보다 이 점 삼 퍼센트 올랐다. 농산물 가격이 안정되면서 상승 폭은 전달보다 줄었다. 다만 외식비와 공공요금은 여전히 오름세를 이어갔다.
+전문가들은 단기적인 대책보다 구조적인 접근이 필요하다고 입을 모았다. 원인이 하나가 아니기 때문에 해결책도 여러 방향에서 동시에 나와야 한다는 것이다. 무엇보다 지속적인 관찰과 자료 축적이 중요하다고 강조했다.
+물은 섭씨 백 도에서 끓고 영 도에서 언다. 다만 압력이 낮아지면 끓는점도 함께 내려간다. 높은 산에서 밥이 설익는 이유가 여기에 있다. 압력솥은 반대로 내부 압력을 높여 끓는점을 올리는 도구다.
+식물은 빛을 받아 이산화탄소와 물로 양분을 만든다. 이 과정에서 산소가 나온다. 밤에는 반대로 호흡만 하기 때문에 산소를 쓰고 이산화탄소를 내놓는다. 잎의 뒷면에 있는 작은 구멍으로 기체가 드나든다.
+ㅋㅋㅋㅋ 진짜 웃겨 나 지금 혼자 웃고 있어 ㅠㅠ 아 배아파 그거 어디서 봤어 링크 좀 보내줘 나도 보고 싶어 ㅇㅇ 지금 보낼게 ㄱㄱ 봤어? 대박이지 ㅇㅈ 인정 완전 내 얘기잖아
+헐 진짜? 언제 그랬대 나만 몰랐네 아니 왜 말 안 했어 서운하다 ㅋㅋ 미안미안 까먹었어 담엔 꼭 말할게 알겠어 넘어가줌 ㅎㅎ
+아 맞다 그거 어떻게 됐어 잘 해결됐어? 응 다행히 잘 끝났어 다행이다 진짜 걱정했잖아 고마워 신경 써줘서 별말씀을 당연한 거지
+오늘 진짜 피곤하다 그냥 집 가서 눕고 싶어 나도 ㅠㅠ 우리 둘 다 쉬어야 해 주말에 푹 자자 그래 그러자
+서버가 새벽에 두 번 재시작됐다. 로그를 보니 메모리 사용량이 계속 올라가다가 한계에 부딪혀 종료된 흔적이었다. 어제 배포한 변경 중에 캐시를 비우지 않는 부분이 있었던 것 같다. 일단 되돌리고 원인을 더 확인하기로 했다.
+빌드가 실패해서 확인해 보니 의존성 버전이 서로 충돌하고 있었다. 잠금 파일을 지우고 다시 설치하니 해결됐다. 다만 왜 갑자기 충돌이 생겼는지는 더 봐야 할 것 같다. 상위 패키지가 조용히 범위를 바꾼 듯하다.
+데이터베이스 조회가 느려서 실행 계획을 확인했다. 인덱스를 타지 않고 전체를 훑고 있었다. 조건절에 함수를 씌운 탓이었다. 함수를 걷어내고 인덱스를 다시 잡으니 응답 시간이 크게 줄었다.
+코드를 고치기 전에 왜 그렇게 되어 있는지부터 이해하는 편이 낫다. 이상해 보이는 부분에도 대개 이유가 있다. 이유를 모른 채 고치면 같은 문제가 다른 모양으로 다시 나타난다.
+테스트를 먼저 써 두면 나중에 손볼 때 마음이 편하다. 무엇이 깨졌는지 바로 알 수 있기 때문이다. 처음에는 번거롭게 느껴지지만, 고칠 일이 반복될수록 이득이 커진다.
+문제를 풀 때는 조건을 먼저 정리하는 게 중요하다. 주어진 것과 구하는 것을 나눠 적기만 해도 길이 보이는 경우가 많다. 막히면 비슷한 유형을 떠올려 보고, 그래도 안 되면 조건을 하나씩 바꿔 가며 어디서 걸리는지 확인한다.
+외우는 것과 이해하는 것은 다르다. 외운 것은 조금만 형태가 바뀌어도 쓸 수 없지만, 이해한 것은 처음 보는 문제에도 적용할 수 있다. 시간이 걸리더라도 왜 그런지를 따져 보는 편이 결국 빠르다.
+복습은 미루지 않는 게 좋다. 배운 날 다시 보면 십 분이면 될 것을, 일주일 뒤에 보면 처음부터 다시 해야 한다. 짧게라도 자주 보는 쪽이 오래 남는다.
+계획은 크게 세우고 실행은 작게 쪼개는 편이 낫다. 오늘 할 일을 한 줄로 적어 두면 시작하기가 훨씬 수월하다. 완벽하게 하려다 아예 시작하지 못하는 경우가 제일 아깝다.
+여행 일정 정리했어 첫날은 도착해서 숙소만 가고 둘째 날부터 움직이자 셋째 날은 좀 여유 있게 잡았어 너무 빡빡하면 힘들더라 마지막 날은 공항 가기 전에 근처만 둘러보면 될 것 같아
+숙소는 역에서 걸어서 십 분 거리야 가격도 괜찮고 후기도 나쁘지 않아 조식은 포함 안 돼 있는데 근처에 먹을 데가 많아서 상관없을 것 같아 예약은 내가 할게 나중에 정산하자
+비행기 시간이 이른 편이라 전날 일찍 자야 할 것 같아 짐은 미리 싸 두는 게 좋겠어 충전기랑 여권은 꼭 챙기고 우산도 하나 넣어 가자 날씨가 오락가락한다더라
+날씨가 갑자기 추워졌다. 어제까지만 해도 얇은 옷으로 버텼는데 오늘은 도저히 안 되겠어서 두꺼운 걸 꺼냈다. 환절기라 감기 걸리기 쉬우니 조심해야겠다.
+장을 보고 왔다. 이번 주에 해 먹을 것들을 대충 정해 놓고 사니 쓸데없는 걸 덜 사게 된다. 냉장고를 한 번 정리하고 넣었더니 훨씬 보기 좋아졌다. 유통기한 지난 것들도 몇 개 버렸다.
+화분에 물을 주는 간격을 조금 늘렸다. 겨울에는 흙이 마르는 속도가 느려서 자주 주면 오히려 뿌리가 상한다고 한다. 손가락을 넣어 보고 속까지 말랐을 때만 주기로 했다.
+집 정리를 했다. 버릴까 말까 망설이던 것들을 이번에는 과감하게 정리했다. 언젠가 쓸지도 모른다는 생각으로 두었던 것들은 결국 몇 년째 그대로였다. 비우고 나니 공간이 넓어 보인다.
 0123456789 abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ .,!?:;()[]"'-~/@#%&*+=<> http https www com net org co.kr
 """
 CORPUS_BYTES = CORPUS.encode('utf-8')
@@ -86,14 +139,14 @@ for _j in range(_p, 4096):
 _RATE = array('i', [int(65536 * 2.0 / (c + 2.0)) for c in range(64)])
 _LIMIT = 60
 
-_BITS = 20
+# 문맥 표 크기. 2^20 이 0.7%쯤 더 좋지만 모형마다 3MB씩 먹는다.
+# 2^19 면 9개 모형에 13.5MB — 휴대전화에서도 안전하고 예열도 빠르다.
+_BITS = 19
 _MASK = (1 << _BITS) - 1
 _M32 = 0xFFFFFFFF
 _M64 = (1 << 64) - 1
-_MULT = [0x9E3779B97F4A7C15, 0x85EBCA6B, 0xC2B2AE35, 0x27D4EB2F,
-         0x165667B19E3779F9, 0x9E3779B1, 0xD6E8FEB8, 0xA0761D6478BD642F]
 
-# v2가 쓰는 32비트 곱수 (JS의 Math.imul과 결과를 맞추기 위해 하위 32비트만 쓴다)
+# 32비트 곱수 — JS의 Math.imul과 결과를 맞추려고 하위 32비트만 쓴다
 _MULT32 = [0x7F4A7C15, 0x85EBCA6B, 0xC2B2AE35, 0x27D4EB2F,
            0x9E3779F9, 0x9E3779B1, 0xD6E8FEB8, 0x78BD642F,
            0x1B873593, 0xCC9E2D51, 0xE6546B64, 0x9E3779B9]
@@ -102,10 +155,10 @@ _MULT32 = [0x7F4A7C15, 0x85EBCA6B, 0xC2B2AE35, 0x27D4EB2F,
 def _fin(x):
     """눈사태 마무리 — 상위 비트를 하위로 끌어내린다.
 
-    v1의 해시는 (이력 & 마스크) * 곱수 의 하위 20비트만 썼다. 곱셈의 하위 비트는
-    피연산자의 하위 비트에만 의존하므로 3바이트 너머의 이력이 해시에 전혀
-    반영되지 않았고, 차수 4·6·8 모델이 차수 2.5 모델과 같은 것을 보고 있었다.
-    이 마무리 단계가 그 결함을 없앤다.
+    문맥 해시는 곱셈 결과의 하위 20비트만 쓴다. 그런데 곱셈의 하위 비트는
+    피연산자의 하위 비트에만 의존하므로, 이 단계가 없으면 3바이트 너머의 이력이
+    해시에 전혀 닿지 못한다. (초기 판이 실제로 그랬고, 차수 4·6·8 모델이
+    차수 2.5 모델과 똑같은 것을 보고 있었다.)
     """
     x &= _M32
     x ^= x >> 16
@@ -120,33 +173,32 @@ def _low(v, bits):
     return v if bits >= 32 else (v & ((1 << bits) - 1))
 
 
-# 압축기 구성. 헤더 최상위 비트가 어느 쪽인지 가린다.
-#   v1 — 처음 배포한 구성. 이미 만들어 둔 암호문을 읽기 위해 그대로 남긴다.
-#   v2 — 해시 결함을 고치고, 차수를 짧은 쪽으로 다시 잡고, 건너뛰기 문맥과
-#        UTF-8 바이트 위치를 혼합기 문맥에 넣었다. held-out 기준 약 4.8% 더 짧다.
 class _Cfg:
-    __slots__ = ('orders', 'fixed', 'sparse', 'pos_mix', 'nm', 'nmix')
+    """압축기 구성.
 
-    def __init__(self, orders, fixed, sparse=(), pos_mix=False):
+    차수는 짧은 쪽(0~6)이 유리하다. 긴 문맥은 코퍼스 안에서 너무 희소해
+    학습이 되지 않아, 차수를 늘려도 0.5% 안쪽이면서 예열만 느려진다.
+    """
+    __slots__ = ('orders', 'sparse', 'pos_mix', 'nm', 'nmix')
+
+    def __init__(self, orders, sparse=(), pos_mix=True):
         self.orders = orders
-        self.fixed = fixed
         self.sparse = sparse
         self.pos_mix = pos_mix
         self.nm = len(orders) + len(sparse) + 1      # + 단어 모델
         self.nmix = 2048 if pos_mix else 512
 
 
-CFG_V1 = _Cfg([0, 1, 2, 3, 4, 6, 8], fixed=False)
-CFG_V2 = _Cfg([0, 1, 2, 3, 4, 5, 6], fixed=True, sparse=((1, 2),), pos_mix=True)
+CFG = _Cfg([0, 1, 2, 3, 4, 5, 6], sparse=((1, 2),))
 
-ORDERS = CFG_V1.orders      # 이전 이름 유지
-NM = CFG_V1.nm
+ORDERS = CFG.orders
+NM = CFG.nm
 
 
 class _Model:
     """여러 차수의 문맥 예측을 로지스틱 혼합으로 합치고 SSE로 보정한다."""
 
-    def __init__(self, cfg=CFG_V1):
+    def __init__(self, cfg=CFG):
         self.cfg = cfg
         nm = cfg.nm
         self.nm = nm
@@ -173,12 +225,6 @@ class _Model:
     def _set_ctx(self):
         cfg = self.cfg
         h = self.hist
-        if not cfg.fixed:
-            for i, o in enumerate(cfg.orders):
-                self.h[i] = 0 if o == 0 else ((h & ((1 << (8 * o)) - 1)) * _MULT[i % 8]) & _M64
-            self.h[self.nm - 1] = (self.wh * 0x9E3779B97F4A7C15) & _M64
-            return
-
         lo = h & _M32
         hi = (h >> 32) & _M32
         for i, o in enumerate(cfg.orders):
@@ -250,7 +296,7 @@ class _Model:
             b = self.c0 & 255
             self.hist = ((self.hist << 8) | b) & _M64
             if b >= 128 or 48 <= b <= 57 or 65 <= b <= 122:
-                self.wh = (self.wh * 0x2F0FD693 + b + 1) & (_M32 if self.cfg.fixed else _M64)
+                self.wh = (self.wh * 0x2F0FD693 + b + 1) & _M32
             else:
                 self.wh = 0
             if self.cfg.pos_mix:
@@ -315,16 +361,142 @@ class _Decoder:
         return bit
 
 
-def _primed_model(cfg=CFG_V1):
-    m = _Model(cfg)
-    for byte in CORPUS_BYTES:
+def _prime_into(m, data):
+    """예열 전용 고속 경로.
+
+    예열은 예측값을 바깥으로 내보내지 않으므로 predict/update를 한 덩어리로 합치고
+    상태를 전부 지역 변수로 끌어올 수 있다. 파이썬에서는 속성 조회를 없애는 것만으로
+    크게 빨라진다. 결과는 predict/update를 번갈아 부른 것과 **완전히 같아야 하며**,
+    tools/crosstest.py 가 그것을 검사한다.
+    """
+    cfg = m.cfg
+    nm = m.nm
+    tabs = m.t
+    cnts = m.n
+    ws = m.w
+    apm = m.apm
+    stretch = _STRETCH
+    squash = _squash
+    rate = _RATE
+    mask = _MASK
+    limit = _LIMIT
+    pos_mix = cfg.pos_mix
+    h = m.h
+    st = [0] * nm
+    idx = [0] * nm
+    rng = range(nm)
+
+    c0 = m.c0
+    if not data:
+        return m
+    pr = i0 = wt = 0
+
+    for byte in data:
         for k in (7, 6, 5, 4, 3, 2, 1, 0):
-            m.predict()
-            m.update((byte >> k) & 1)
+            bit = (byte >> k) & 1
+            hist = m.hist
+
+            sel = (c0 & 255) | (256 if hist & 128 else 0)
+            if pos_mix:
+                sel += 512 * m.pos
+            w = ws[sel]
+
+            cm = c0 * 0x6F4F2F1F
+            dot = 0
+            for i in rng:
+                j = (h[i] ^ cm) & mask
+                idx[i] = j
+                s = stretch[tabs[i][j] >> 4]
+                st[i] = s
+                dot += w[i] * s
+
+            p = squash(dot >> 16)
+            ctx = (c0 & 255) | ((hist & 3) << 8)
+            s = stretch[p]
+            i0 = ctx * 33 + ((s + 2048) >> 7)
+            wt = (s + 2048) & 127
+            pa = (apm[i0] * (128 - wt) + apm[i0 + 1] * wt) >> 11
+            pr = (p + 3 * pa) >> 2
+            if pr < 1: pr = 1
+            elif pr > 4094: pr = 4094
+
+            # --- update ---
+            g = (bit << 16) + (bit << 4) - bit - bit
+            apm[i0] += ((g - apm[i0]) * (128 - wt)) >> 12
+            apm[i0 + 1] += ((g - apm[i0 + 1]) * wt) >> 12
+            err = ((bit << 12) - pr) * 10
+            tgt = bit << 16
+            for i in rng:
+                w[i] += (st[i] * err) >> 13
+                j = idx[i]
+                t = tabs[i]
+                n = cnts[i]
+                c = n[j]
+                t[j] += ((tgt - t[j]) * rate[c]) >> 17
+                if c < limit: n[j] = c + 1
+
+            c0 = (c0 << 1) | bit
+            if c0 >= 256:
+                b = c0 & 255
+                m.hist = ((hist << 8) | b) & _M64
+                if b >= 128 or 48 <= b <= 57 or 65 <= b <= 122:
+                    m.wh = (m.wh * 0x2F0FD693 + b + 1) & _M32
+                else:
+                    m.wh = 0
+                if pos_mix:
+                    if b < 0x80:     m.pos = 0
+                    elif b >= 0xF0:  m.pos = 3
+                    elif b >= 0xE0:  m.pos = 2
+                    elif b >= 0xC0:  m.pos = 1
+                    else:            m.pos = m.pos - 1 if m.pos > 0 else 0
+                c0 = 1
+                m._set_ctx()
+
+    m.c0 = c0
+    m.pr = pr
+    m._ai = i0
+    m._aw = wt
     return m
 
 
-def cm_compress(data: bytes, cfg=CFG_V1) -> bytes:
+_prime_cache = {}
+
+
+def _snapshot(m):
+    return (list(m.t), list(m.n), [array('i', w) for w in m.w], array('H', m.apm),
+            list(m.h), m.c0, m.hist, m.wh, m.pos, m.pr, m._ai, m._aw)
+
+
+def _primed_model(cfg=CFG):
+    """예열이 끝난 모델을 준다.
+
+    예열은 이 도구에서 가장 비싼 단계인데 결과는 늘 같다. 한 번만 돌려 두고
+    이후로는 복사본을 내준다. 한 프로세스에서 여러 번 부를 때 크게 빨라진다.
+    """
+    key = id(cfg)
+    snap = _prime_cache.get(key)
+    if snap is None:
+        base = _prime_into(_Model(cfg), CORPUS_BYTES)
+        snap = _snapshot(base)
+        _prime_cache[key] = snap
+
+    t, n, w, apm, h, c0, hist, wh, pos, pr, ai, aw = snap
+    m = _Model.__new__(_Model)
+    m.cfg = cfg
+    m.nm = cfg.nm
+    m.t = [array('H', x) for x in t]
+    m.n = [bytearray(x) for x in n]
+    m.w = [array('i', x) for x in w]
+    m.apm = array('H', apm)
+    m.h = list(h)
+    m.idx = [0] * cfg.nm
+    m.st = [0] * cfg.nm
+    m.c0, m.hist, m.wh, m.pos, m.pr = c0, hist, wh, pos, pr
+    m._ai, m._aw = ai, aw
+    return m
+
+
+def cm_compress(data: bytes, cfg=CFG) -> bytes:
     m = _primed_model(cfg)
     e = _Encoder()
     for byte in data:
@@ -334,7 +506,7 @@ def cm_compress(data: bytes, cfg=CFG_V1) -> bytes:
     return e.flush()
 
 
-def cm_decompress(blob: bytes, n: int, cfg=CFG_V1) -> bytes:
+def cm_decompress(blob: bytes, n: int, cfg=CFG) -> bytes:
     m = _primed_model(cfg)
     d = _Decoder(blob)
     out = bytearray()
@@ -432,18 +604,16 @@ def _read_varint(data, i):
 
 
 def encrypt(text: str, password: str = None, *, seed_len=6, tag_len=4,
-            method='auto', version=2) -> bytes:
+            method='auto') -> bytes:
     import lzma
     raw = text.encode('utf-8')
-    if version not in (1, 2): raise ValueError('버전은 1 또는 2')
-    cfg = CFG_V2 if version == 2 else CFG_V1
 
     # --- 압축 방식 선택: 셋 다 해보고 가장 짧은 것을 고른다 ---
     cands = []
     if method in ('auto', 'raw'):
         cands.append((0, raw))
     if method in ('auto', 'cm'):
-        cands.append((1, cm_compress(raw, cfg)))
+        cands.append((1, cm_compress(raw)))
     if method in ('auto', 'lzma'):
         cands.append((2, lzma.compress(raw, preset=9 | lzma.PRESET_EXTREME)))
     mid, body = min(cands, key=lambda p: len(p[1]))
@@ -460,8 +630,7 @@ def encrypt(text: str, password: str = None, *, seed_len=6, tag_len=4,
     ct = chacha20(ekey, b'\0' * 12, payload)
 
     hdr = bytes([mid | (_SEED_OPT.index(seed_len) << 2) |
-                 (_TAG_OPT.index(tag_len) << 4) | (0x40 if keyed else 0) |
-                 (0x80 if version == 2 else 0)])
+                 (_TAG_OPT.index(tag_len) << 4) | (0x40 if keyed else 0) | 0x80])
     blob = hdr + seed + ct
     if tag_len:
         blob += hmac.new(akey, blob, hashlib.sha256).digest()[:tag_len]
@@ -476,7 +645,9 @@ def decrypt(blob: bytes, password: str = None) -> str:
     seed_len = _SEED_OPT[(hdr >> 2) & 3]
     tag_len = _TAG_OPT[(hdr >> 4) & 3]
     keyed = bool(hdr & 0x40)
-    cfg = CFG_V2 if hdr & 0x80 else CFG_V1
+    if not hdr & 0x80:
+        raise ValueError('시험판(v1)으로 만든 암호문입니다. 지금 판과는 호환되지 않습니다. '
+                         '다시 봉인해 주세요.')
     if mid == 3:
         raise ValueError('알 수 없는 형식입니다.')
     if keyed and password is None:
@@ -502,7 +673,7 @@ def decrypt(blob: bytes, password: str = None) -> str:
     else:
         n, j = _read_varint(payload, 0)
         body = payload[j:]
-        raw = cm_decompress(body, n, cfg) if mid == 1 else lzma.decompress(body)
+        raw = cm_decompress(body, n) if mid == 1 else lzma.decompress(body)
         if len(raw) != n:
             raise ValueError('복호화 실패: 길이가 맞지 않습니다.')
     return raw.decode('utf-8')
@@ -608,21 +779,19 @@ def _selftest():
         '가' * 300,
         '',
     ]
-    print(f"{'원문':>6} {'gzip':>6} {'bz2':>6} {'xz':>6} {'v1':>5} {'v2':>5} "
+    print(f"{'원문':>6} {'gzip':>6} {'bz2':>6} {'xz':>6} {'이도구':>7} "
           f"{'base85':>7} {'한글':>5}  내용")
-    print('-' * 86)
+    print('-' * 84)
     ok = True
     for s in samples:
         raw = s.encode('utf-8')
-        blob1 = encrypt(s, 'test-비밀번호', version=1)
         blob = encrypt(s, 'test-비밀번호')          # 기본은 v2
         tok = to_token(blob)
         han = to_hangul(blob)
         try:
-            # 한글·base85 양쪽 표기, v1·v2 양쪽 형식을 모두 읽을 수 있어야 한다
+            # 한글·base85 어느 표기로 적어도 똑같이 읽혀야 한다
             good = (decrypt(decode_token(han), 'test-비밀번호') == s
-                    and decrypt(decode_token(tok), 'test-비밀번호') == s
-                    and decrypt(blob1, 'test-비밀번호') == s)
+                    and decrypt(decode_token(tok), 'test-비밀번호') == s)
         except Exception as e:
             good = False; print('  오류:', e)
         ok &= good
@@ -630,7 +799,7 @@ def _selftest():
         b = len(bz2.compress(raw, 9)) if raw else 0
         x = len(lzma.compress(raw, preset=9)) if raw else 0
         mark = '' if good else '  ← 실패!'
-        print(f'{len(raw):6d} {g:6d} {b:6d} {x:6d} {len(blob1):5d} {len(blob):5d} '
+        print(f'{len(raw):6d} {g:6d} {b:6d} {x:6d} {len(blob):7d} '
               f'{len(tok):7d} {len(han):5d}  {s[:20]!r}{mark}')
     # 변조 감지
     blob = bytearray(encrypt('테스트 메시지입니다', 'pw'))
@@ -676,8 +845,6 @@ def main(argv=None):
             p.add_argument('--binary', action='store_true', help='토큰 대신 원시 바이트로 출력')
             p.add_argument('--base85', action='store_true',
                            help='한글 대신 base85로 출력 (영문만 받는 곳에 붙일 때)')
-            p.add_argument('--v1', action='store_true',
-                           help='옛 압축기(v1)로 만든다 — 보통 쓸 일 없음')
     sub.add_parser('selftest', help='자체 검증 및 압축률 비교')
 
     a = ap.parse_args(argv)
@@ -697,7 +864,7 @@ def main(argv=None):
         if a.min:    kw = dict(seed_len=0, tag_len=0)
         if a.strong: kw = dict(seed_len=8, tag_len=16)
         t0 = time.time()
-        blob = encrypt(text, a.key, version=1 if a.v1 else 2, **kw)
+        blob = encrypt(text, a.key, **kw)
         dt = time.time() - t0
         encode = to_token if a.base85 else to_hangul
         if a.outfile:

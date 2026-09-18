@@ -25,18 +25,16 @@ async function main() {
   const say = (ok, msg) => { if (!ok) fail++; console.log((ok ? '  OK   ' : '  FAIL ') + msg); };
 
   // 1) 압축기 출력이 바이트 단위로 같은가 (가장 중요 — 여기가 어긋나면 전부 깨진다)
-  console.log('[1] CM 압축기 바이트 일치 (v1 / v2)');
+  console.log('[1] CM 압축기 바이트 일치');
   for (const v of vectors.compress) {
     const raw = new TextEncoder().encode(v.text);
-    const g1 = HC.cmCompress(raw, HC.CFG_V1), g2 = HC.cmCompress(raw, HC.CFG_V2);
-    const ok1 = b64(g1) === v.cm, ok2 = b64(g2) === v.cm2;
-    say(ok1 && ok2, `${JSON.stringify(v.text.slice(0, 20))}  v1 ${g1.length}B / v2 ${g2.length}B` +
-        (ok1 && ok2 ? '' : `  ← Python과 다름 (v1 ${ok1}, v2 ${ok2})`));
-    results.compress.push(ok1 && ok2);
-    const b1 = HC.cmDecompress(g1, raw.length, HC.CFG_V1);
-    const b2 = HC.cmDecompress(g2, raw.length, HC.CFG_V2);
-    say(new TextDecoder().decode(b1) === v.text && new TextDecoder().decode(b2) === v.text,
-        `  ↳ JS 자체 왕복 (v1·v2)`);
+    const g = HC.cmCompress(raw);
+    const ok = b64(g) === v.cm;
+    say(ok, `${JSON.stringify(v.text.slice(0, 22))} → ${g.length}B` +
+        (ok ? '' : `  ← Python(${unb64(v.cm).length}B)과 다름`));
+    results.compress.push(ok);
+    say(new TextDecoder().decode(HC.cmDecompress(g, raw.length)) === v.text,
+        `  ↳ JS 자체 왕복`);
   }
 
   // 2) 표기(base85 / 한글)가 Python과 같은가
@@ -58,7 +56,7 @@ async function main() {
 
   // 3) Python이 암호화한 것을 JS가 푸는가 (v1·v2, 한글·base85 섞어서)
   console.log('\n[3] Python 암호화 → JS 복호화');
-  let v1n = 0, v2n = 0;
+  let n = 0;
   for (const v of vectors.decrypt) {
     let ok = false, note = '';
     try {
@@ -66,11 +64,11 @@ async function main() {
       ok = got === v.text;
       if (!ok) note = ` (받은 값: ${JSON.stringify(got.slice(0, 30))})`;
     } catch (e) { note = ' — ' + e.message; }
-    if (ok) { if (v.version === 1) v1n++; else v2n++; }
-    if (!ok) say(false, `v${v.version} ${JSON.stringify(v.text.slice(0, 22))}${note}`);
+    if (ok) n++;
+    else say(false, `${JSON.stringify(v.text.slice(0, 22))}${note}`);
     results.decrypt.push(ok);
   }
-  say(results.decrypt.every(Boolean), `v1 ${v1n}건, v2 ${v2n}건 모두 복호화됨`);
+  say(results.decrypt.every(Boolean), `${n}건 모두 복호화됨 (한글·base85 섞어서)`);
 
   // 4) 변조 / 틀린 비밀번호 거부
   console.log('\n[4] 인증 동작');
@@ -97,8 +95,7 @@ async function main() {
     const token = HC.toHangul(blob);
     let selfOk = false;
     try { selfOk = (await HC.decrypt(HC.decodeToken(token), v.password)) === v.text; } catch (e) {}
-    const ver = (blob[0] & 0x80) ? 2 : 1;
-    say(selfOk, `v${ver} ${JSON.stringify(v.text.slice(0, 20))} → ${blob.length}B / ` +
+    say(selfOk, `${JSON.stringify(v.text.slice(0, 20))} → ${blob.length}B / ` +
         `한글 ${token.length}자 (base85라면 ${HC.toToken(blob).length}자)`);
     produced.push({ text: v.text, password: v.password, token });
     results.encrypt.push(selfOk);
