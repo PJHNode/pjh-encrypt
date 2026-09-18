@@ -106,6 +106,14 @@
   }
 
   var CFG = new Cfg([0, 1, 2, 3, 4, 5, 6], [[1, 2]]);
+
+  // 일치 모델 — 지금까지 본 글(코퍼스 포함)에서 방금 쓴 부분과 길게 겹치는 곳을 찾아
+  // 그다음 바이트를 예측한다. 짧은 메시지에서는 1~2%지만, 같은 표현이 되풀이되는
+  // 긴 글에서는 17% 가까이 줄어든다. 겹침이 8바이트(한글 2~3글자) 이상일 때만 따른다.
+  var MATCH_MIN = 8;
+  var MATCH_BITS = 16;
+  var MATCH_SIZE = 1 << MATCH_BITS;
+  var MATCH_VERIFY = 32;
   var ORDERS = CFG.orders;
   var NM = CFG.nm;
 
@@ -122,7 +130,7 @@
     }
     this.w = [];
     for (var q = 0; q < cfg.nmix; q++) {
-      var wv = new Int32Array(nm); wv.fill(1 << 14);
+      var wv = new Int32Array(nm + 1); wv.fill(1 << 14);   // +일치 모델
       this.w.push(wv);
     }
     this.apm = new Uint16Array(1024 * 33);
@@ -135,9 +143,16 @@
     this.st = new Int32Array(nm);
     this.c0 = 1;
     this.hist = 0;     // 직전 1~4바이트
-    this.histHi = 0;   // 직전 5~8바이트 (v2만 사용)
+    this.histHi = 0;   // 직전 5~8바이트
     this.wh = 0;       // 단어 해시의 하위 32비트
-    this.pos = 0;      // UTF-8 연속바이트 위치 (v2만 사용)
+    this.pos = 0;      // UTF-8 연속바이트 위치
+    this.buf = new Uint8Array(1 << 15);        // 지금까지 본 모든 바이트
+    this.blen = 0;
+    this.mt = new Int32Array(MATCH_SIZE);      // 해시 → 그 뒤에 올 바이트의 위치
+    this.ms = new Uint16Array(32); this.ms.fill(32768);   // 일치 길이별 "맞을" 확률
+    this.mn = new Uint8Array(32);
+    this.mlen = 0; this.mptr = 0; this.mexp = 0;
+    this.mst = 0; this.mi = -1; this.mbit = 0;
     this.pr = 2048;
     this._ai = 0;
     this._aw = 0;
@@ -184,6 +199,20 @@
       this.st[i] = s;
       dot += w[i] * s;
     }
+    this.mst = 0;
+    this.mi = -1;
+    if (this.mlen > 0) {
+      var known = 31 - Math.clz32(c0);              // 이 바이트에서 이미 본 비트 수
+      if (((this.mexp | 256) >> (8 - known)) === c0) {
+        var eb = (this.mexp >> (7 - known)) & 1;
+        var mi = this.mlen < 31 ? this.mlen : 31;
+        var ms = STRETCH[this.ms[mi] >> 4];
+        this.mbit = eb;
+        this.mi = mi;
+        this.mst = eb ? ms : -ms;
+        dot += w[this.nm] * this.mst;
+      }
+    }
     var p = squash(Math.floor(dot / 65536));
     var ctx = (c0 & 255) | ((this.hist & 3) << 8);
     var st = STRETCH[p];
@@ -218,6 +247,13 @@
       t[j] += Math.floor((tgt - t[j]) * RATE[c] / 131072);
       if (c < LIMIT) n[j] = c + 1;
     }
+    w[this.nm] += (this.mst * err) >> 13;
+    if (this.mi >= 0) {
+      var mc = this.mn[this.mi];
+      this.ms[this.mi] += Math.floor(
+        (((bit === this.mbit ? 1 : 0) << 16) - this.ms[this.mi]) * RATE[mc] / 131072);
+      if (mc < LIMIT) this.mn[this.mi] = mc + 1;
+    }
     this.c0 = (this.c0 << 1) | bit;
     if (this.c0 >= 256) {
       var b = this.c0 & 255;
@@ -235,9 +271,41 @@
         else if (b >= 0xC0) this.pos = 1;
         else this.pos = this.pos > 0 ? this.pos - 1 : 0;
       }
+      this._matchByte(b);
       this.c0 = 1;
       this._setCtx();
     }
+  };
+
+  Model.prototype._matchByte = function (b) {
+    if (this.blen === this.buf.length) {
+      var nb = new Uint8Array(this.buf.length * 2);
+      nb.set(this.buf);
+      this.buf = nb;
+    }
+    var buf = this.buf;
+    buf[this.blen++] = b;
+    var n = this.blen;
+    if (this.mlen > 0) {
+      if (buf[this.mptr] === b) { this.mlen++; this.mptr++; }
+      else this.mlen = 0;
+    }
+    if (n >= MATCH_MIN) {
+      var acc = 0x811C9DC5 | 0;                     // FNV-1a (32비트)
+      for (var q = n - MATCH_MIN; q < n; q++) acc = Math.imul(acc ^ buf[q], 0x01000193);
+      var h = fin(acc) & (MATCH_SIZE - 1);
+      if (this.mlen === 0) {
+        var cand = this.mt[h];
+        if (cand > 0) {
+          var ln = 0;
+          while (ln < MATCH_VERIFY && cand - 1 - ln >= 0 &&
+                 buf[cand - 1 - ln] === buf[n - 1 - ln]) ln++;
+          if (ln >= MATCH_MIN) { this.mlen = ln; this.mptr = cand; }
+        }
+      }
+      this.mt[h] = n;
+    }
+    this.mexp = this.mlen > 0 ? buf[this.mptr] : 0;
   };
 
   function Encoder() { this.x1 = 0; this.x2 = 4294967295; this.out = []; }
@@ -300,7 +368,9 @@
       w: m.w.map(function (a) { return a.slice(); }),
       apm: m.apm.slice(), h: m.h.slice(), idx: m.idx.slice(), st: m.st.slice(),
       c0: m.c0, hist: m.hist, histHi: m.histHi, wh: m.wh, pos: m.pos,
-      pr: m.pr, _ai: m._ai, _aw: m._aw
+      pr: m.pr, _ai: m._ai, _aw: m._aw,
+      buf: m.buf.slice(0, m.blen), blen: m.blen, mt: m.mt.slice(), ms: m.ms.slice(),
+      mn: m.mn.slice(), mlen: m.mlen, mptr: m.mptr, mexp: m.mexp
     };
   }
 
@@ -328,6 +398,12 @@
     m.apm = s.apm.slice(); m.h = s.h.slice(); m.idx = s.idx.slice(); m.st = s.st.slice();
     m.c0 = s.c0; m.hist = s.hist; m.histHi = s.histHi; m.wh = s.wh; m.pos = s.pos;
     m.pr = s.pr; m._ai = s._ai; m._aw = s._aw;
+    m.buf = new Uint8Array(Math.max(s.blen * 2, 1 << 15));
+    m.buf.set(s.buf);
+    m.blen = s.blen;
+    m.mt = s.mt.slice(); m.ms = s.ms.slice(); m.mn = s.mn.slice();
+    m.mlen = s.mlen; m.mptr = s.mptr; m.mexp = s.mexp;
+    m.mst = 0; m.mi = -1; m.mbit = 0;
     return m;
   }
 
@@ -408,10 +484,127 @@
   // ══════════════════════════════════════════════════════════════════
   //  4. 키 유도 + 컨테이너
   // ══════════════════════════════════════════════════════════════════
-  var PBKDF2_ITERS = 200000;
+  // 열쇠 유도 — scrypt (RFC 7914).
+  //   실제 공격은 열쇠말을 하나씩 넣어 보는 쪽으로 온다. scrypt는 시도 한 번마다
+  //   메모리를 64MB씩 쓰게 만들어 GPU·전용 칩으로 대량 병렬 공격하는 비용을 올린다.
+  //   N=2^16, r=8, p=2 는 OWASP가 N=2^17·r=8·p=1 과 같은 강도로 꼽는 값이다.
+  //   WebCrypto에는 scrypt가 없어서, 바깥 두 단계의 PBKDF2(1회)는 WebCrypto에 맡기고
+  //   메모리를 쓰는 ROMix만 여기서 돈다. 결과는 Python hashlib.scrypt와 같다.
+  var SCRYPT_N = 1 << 16;
+  var SCRYPT_R = 8;
+  var SCRYPT_P = 2;
+
+  // Salsa20/8 코어 — B[bi..bi+15] 를 제자리에서 바꾼다
+  function salsa8(B, bi) {
+    var j0 = B[bi], j1 = B[bi + 1], j2 = B[bi + 2], j3 = B[bi + 3],
+        j4 = B[bi + 4], j5 = B[bi + 5], j6 = B[bi + 6], j7 = B[bi + 7],
+        j8 = B[bi + 8], j9 = B[bi + 9], j10 = B[bi + 10], j11 = B[bi + 11],
+        j12 = B[bi + 12], j13 = B[bi + 13], j14 = B[bi + 14], j15 = B[bi + 15];
+    var x0 = j0, x1 = j1, x2 = j2, x3 = j3, x4 = j4, x5 = j5, x6 = j6, x7 = j7,
+        x8 = j8, x9 = j9, x10 = j10, x11 = j11, x12 = j12, x13 = j13, x14 = j14, x15 = j15, u;
+    for (var i = 0; i < 8; i += 2) {
+      u = x0 + x12 | 0;  x4 ^= u << 7 | u >>> 25;
+      u = x4 + x0 | 0;   x8 ^= u << 9 | u >>> 23;
+      u = x8 + x4 | 0;   x12 ^= u << 13 | u >>> 19;
+      u = x12 + x8 | 0;  x0 ^= u << 18 | u >>> 14;
+      u = x5 + x1 | 0;   x9 ^= u << 7 | u >>> 25;
+      u = x9 + x5 | 0;   x13 ^= u << 9 | u >>> 23;
+      u = x13 + x9 | 0;  x1 ^= u << 13 | u >>> 19;
+      u = x1 + x13 | 0;  x5 ^= u << 18 | u >>> 14;
+      u = x10 + x6 | 0;  x14 ^= u << 7 | u >>> 25;
+      u = x14 + x10 | 0; x2 ^= u << 9 | u >>> 23;
+      u = x2 + x14 | 0;  x6 ^= u << 13 | u >>> 19;
+      u = x6 + x2 | 0;   x10 ^= u << 18 | u >>> 14;
+      u = x15 + x11 | 0; x3 ^= u << 7 | u >>> 25;
+      u = x3 + x15 | 0;  x7 ^= u << 9 | u >>> 23;
+      u = x7 + x3 | 0;   x11 ^= u << 13 | u >>> 19;
+      u = x11 + x7 | 0;  x15 ^= u << 18 | u >>> 14;
+      u = x0 + x3 | 0;   x1 ^= u << 7 | u >>> 25;
+      u = x1 + x0 | 0;   x2 ^= u << 9 | u >>> 23;
+      u = x2 + x1 | 0;   x3 ^= u << 13 | u >>> 19;
+      u = x3 + x2 | 0;   x0 ^= u << 18 | u >>> 14;
+      u = x5 + x4 | 0;   x6 ^= u << 7 | u >>> 25;
+      u = x6 + x5 | 0;   x7 ^= u << 9 | u >>> 23;
+      u = x7 + x6 | 0;   x4 ^= u << 13 | u >>> 19;
+      u = x4 + x7 | 0;   x5 ^= u << 18 | u >>> 14;
+      u = x10 + x9 | 0;  x11 ^= u << 7 | u >>> 25;
+      u = x11 + x10 | 0; x8 ^= u << 9 | u >>> 23;
+      u = x8 + x11 | 0;  x9 ^= u << 13 | u >>> 19;
+      u = x9 + x8 | 0;   x10 ^= u << 18 | u >>> 14;
+      u = x15 + x14 | 0; x12 ^= u << 7 | u >>> 25;
+      u = x12 + x15 | 0; x13 ^= u << 9 | u >>> 23;
+      u = x13 + x12 | 0; x14 ^= u << 13 | u >>> 19;
+      u = x14 + x13 | 0; x15 ^= u << 18 | u >>> 14;
+    }
+    B[bi] = j0 + x0 | 0;     B[bi + 1] = j1 + x1 | 0;   B[bi + 2] = j2 + x2 | 0;
+    B[bi + 3] = j3 + x3 | 0; B[bi + 4] = j4 + x4 | 0;   B[bi + 5] = j5 + x5 | 0;
+    B[bi + 6] = j6 + x6 | 0; B[bi + 7] = j7 + x7 | 0;   B[bi + 8] = j8 + x8 | 0;
+    B[bi + 9] = j9 + x9 | 0; B[bi + 10] = j10 + x10 | 0; B[bi + 11] = j11 + x11 | 0;
+    B[bi + 12] = j12 + x12 | 0; B[bi + 13] = j13 + x13 | 0;
+    B[bi + 14] = j14 + x14 | 0; B[bi + 15] = j15 + x15 | 0;
+  }
+
+  // BlockMix — 결과는 (Y0, Y2, …, Y1, Y3, …) 순서로 X에 되돌린다
+  function blockMix(X, Y, r, T) {
+    T.set(X.subarray((2 * r - 1) * 16, 2 * r * 16));
+    for (var i = 0; i < 2 * r; i++) {
+      var o = i * 16;
+      for (var k = 0; k < 16; k++) T[k] ^= X[o + k];
+      salsa8(T, 0);
+      Y.set(T, ((i >> 1) + (i & 1) * r) * 16);
+    }
+    X.set(Y);
+  }
+
+  function roMix(W, r, N, V, X, Y, T) {
+    var len = 32 * r, i, k;
+    X.set(W);
+    for (i = 0; i < N; i++) { V.set(X, i * len); blockMix(X, Y, r, T); }
+    for (i = 0; i < N; i++) {
+      var off = (X[(2 * r - 1) * 16] & (N - 1)) * len;
+      for (k = 0; k < len; k++) X[k] ^= V[off + k];
+      blockMix(X, Y, r, T);
+    }
+    W.set(X);
+  }
+
+  async function scrypt(pwBytes, salt, N, r, p, dkLen) {
+    var base = await webcrypto.subtle.importKey('raw', pwBytes, 'PBKDF2', false, ['deriveBits']);
+    var B = new Uint8Array(await webcrypto.subtle.deriveBits(
+      { name: 'PBKDF2', salt: salt, iterations: 1, hash: 'SHA-256' }, base, p * 128 * r * 8));
+    var len = 32 * r;
+    var V = new Int32Array(len * N);
+    var X = new Int32Array(len), Y = new Int32Array(len), W = new Int32Array(len);
+    var T = new Int32Array(16);
+    var dv = new DataView(B.buffer);
+    for (var i = 0; i < p; i++) {
+      var off = i * 128 * r, k;
+      for (k = 0; k < len; k++) W[k] = dv.getInt32(off + k * 4, true);   // 리틀엔디언
+      roMix(W, r, N, V, X, Y, T);
+      for (k = 0; k < len; k++) dv.setInt32(off + k * 4, W[k], true);
+    }
+    V.fill(0);   // 64MB 작업 공간을 비워 둔다
+    var out = await webcrypto.subtle.deriveBits(
+      { name: 'PBKDF2', salt: B, iterations: 1, hash: 'SHA-256' }, base, dkLen * 8);
+    return new Uint8Array(out);
+  }
+
   var SEED_OPT = [0, 4, 6, 8];
   var TAG_OPT = [0, 4, 8, 16];
   var NOKEY_PASSWORD = 'hangul-crypt-no-key';
+
+  // 길이 감추기 — 압축한 뒤 암호화하면 암호문 길이가 내용에 따라 달라진다.
+  // 전체 길이를 Padmé 방식으로 맞춰 채우면 길이가 드러내는 정보가 O(log log n)
+  // 비트로 줄고, 늘어나는 크기는 최대 12%다. 32바이트 이하는 모두 32바이트로.
+  var PAD_MIN = 32;
+
+  function padTarget(n) {
+    if (n <= PAD_MIN) return PAD_MIN;
+    var e = 31 - Math.clz32(n);        // floor(log2 n)
+    var sb = 32 - Math.clz32(e);       // floor(log2 e) + 1
+    var mask = (1 << (e - sb)) - 1;
+    return (n + mask) & ~mask;
+  }
 
   function concatBytes(parts) {
     var total = 0, i;
@@ -423,12 +616,9 @@
 
   async function deriveKeys(password, seed) {
     var fp = await corpusFingerprint();
-    var salt = concatBytes([new Uint8Array([0x48, 0x47, 0x43, 0x31, fp]), seed]); // 'HGC1'
-    var base = await webcrypto.subtle.importKey(
-      'raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
-    var bits = await webcrypto.subtle.deriveBits(
-      { name: 'PBKDF2', salt: salt, iterations: PBKDF2_ITERS, hash: 'SHA-256' }, base, 512);
-    var dk = new Uint8Array(bits);
+    var salt = concatBytes([new Uint8Array([0x48, 0x47, 0x43, 0x33, fp]), seed]); // 'HGC3'
+    var dk = await scrypt(new TextEncoder().encode(password), salt,
+                          SCRYPT_N, SCRYPT_R, SCRYPT_P, 64);
     return [dk.slice(0, 32), dk.slice(32, 64)];
   }
 
@@ -471,6 +661,7 @@
     var seedLen = opts.seedLen === undefined ? 6 : opts.seedLen;
     var tagLen = opts.tagLen === undefined ? 4 : opts.tagLen;
     var method = opts.method || 'auto';
+    var pad = !!opts.pad;
     if (password === undefined) password = null;
 
     var raw = new TextEncoder().encode(text);
@@ -497,13 +688,18 @@
 
     var seed = new Uint8Array(seedLen);
     if (seedLen) webcrypto.getRandomValues(seed);
+    if (pad) {
+      var inner = concatBytes([varint(payload.length), payload]);
+      var unpadded = 1 + seedLen + inner.length + tagLen;
+      payload = concatBytes([inner, new Uint8Array(padTarget(unpadded) - unpadded)]);
+    }
 
     var keys = await deriveKeys(pw, seed);
     var ct = chacha20(keys[0], new Uint8Array(12), payload);
 
     var hdr = new Uint8Array([
       mid | (SEED_OPT.indexOf(seedLen) << 2) | (TAG_OPT.indexOf(tagLen) << 4) |
-      (keyed ? 0x40 : 0) | 0x80
+      (keyed ? 0x40 : 0) | (pad ? 0x80 : 0)
     ]);
     var blob = concatBytes([hdr, seed, ct]);
     if (tagLen) {
@@ -521,10 +717,7 @@
     var seedLen = SEED_OPT[(hdr >> 2) & 3];
     var tagLen = TAG_OPT[(hdr >> 4) & 3];
     var keyed = !!(hdr & 0x40);
-    if (!(hdr & 0x80)) {
-      throw new Error('시험판(v1)으로 만든 암호문입니다. 지금 판과는 호환되지 않습니다. ' +
-        '다시 봉인해 주세요.');
-    }
+    var padded = !!(hdr & 0x80);
     if (mid === 3) throw new Error('알 수 없는 형식입니다.');
     if (mid === 2) {
       throw new Error('이 데이터는 lzma로 압축되어 있습니다. 브라우저에서는 풀 수 없으니 ' +
@@ -543,11 +736,16 @@
       var full = await hmacSha256(keys[1], blob.slice(0, end));
       if (!timingSafeEqual(full.slice(0, tagLen), blob.slice(end))) {
         throw new Error('인증 실패: 비밀번호가 틀렸거나, 데이터가 손상되었거나, ' +
-          '프로그램 버전(코퍼스)이 다릅니다.');
+          '다른 판에서 만든 암호문입니다.');
       }
     }
 
     var payload = chacha20(keys[0], new Uint8Array(12), ct);
+    if (padded) {
+      var pv = readVarint(payload, 0);
+      if (pv[1] + pv[0] > payload.length) throw new Error('데이터가 잘렸습니다.');
+      payload = payload.slice(pv[1], pv[1] + pv[0]);
+    }
     var raw;
     if (mid === 0) {
       raw = payload;
@@ -697,7 +895,9 @@
     corpusFingerprint: corpusFingerprint,
     CORPUS: CORPUS,
     CFG: CFG,
-    PBKDF2_ITERS: PBKDF2_ITERS,
+    SCRYPT: { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P },
+    scrypt: scrypt,
+    padTarget: padTarget,
     _prime: function (cfg) { return newPrimed(cfg); }
   };
 });

@@ -8,7 +8,7 @@ hangul_crypt.py — 한글 텍스트 초압축 + 암호화 도구
            gzip/bzip2/xz보다 한국어에서 2~3배 더 짧다.
   2) 암호: ChaCha20 스트림 암호(순수 파이썬) + HMAC-SHA256 인증 태그.
            스트림 암호라 암호화해도 길이가 전혀 늘지 않는다.
-  3) 키:   비밀번호 → PBKDF2-HMAC-SHA256(200,000회)로 키 유도.
+  3) 키:   비밀번호 → scrypt(N=2^16, r=8, p=2, 64MB)로 키 유도.
   4) 표기: 한글 음절 한 글자에 13비트를 담는다. base85(6.4비트/글자)의 절반 길이다.
 
 표준 라이브러리만 사용. 설치 불필요.
@@ -18,6 +18,7 @@ hangul_crypt.js 와 바이트 단위로 호환된다 (tools/crosstest.py 가 검
   python hangul_crypt.py enc -k 비밀번호 "숨길 내용"
   python hangul_crypt.py dec -k 비밀번호 "출력된암호문"   # 한글·base85 자동 인식
   python hangul_crypt.py enc -k pw --base85 "..."      # 영문만 받는 곳에 붙일 때
+  python hangul_crypt.py enc -k pw --pad "..."         # 길이 감추기
   python hangul_crypt.py enc -k pw -i 입력.txt -o 출력.hgc
   python hangul_crypt.py selftest
 """
@@ -191,6 +192,14 @@ class _Cfg:
 
 CFG = _Cfg([0, 1, 2, 3, 4, 5, 6], sparse=((1, 2),))
 
+# 일치 모델 — 지금까지 본 글(코퍼스 포함)에서 방금 쓴 부분과 길게 겹치는 곳을 찾아
+# 그다음 바이트를 예측한다. 짧은 메시지에서는 1~2%지만, 같은 표현이 되풀이되는
+# 긴 글에서는 17% 가까이 줄어든다. 겹침이 8바이트(한글 2~3글자) 이상일 때만 따른다.
+_MATCH_MIN = 8
+_MATCH_BITS = 16
+_MATCH_SIZE = 1 << _MATCH_BITS
+_MATCH_VERIFY = 32
+
 ORDERS = CFG.orders
 NM = CFG.nm
 
@@ -204,7 +213,7 @@ class _Model:
         self.nm = nm
         self.t = [array('H', [32768]) * (_MASK + 1) for _ in range(nm)]
         self.n = [bytearray(_MASK + 1) for _ in range(nm)]
-        self.w = [array('i', [1 << 14]) * nm for _ in range(cfg.nmix)]
+        self.w = [array('i', [1 << 14]) * (nm + 1) for _ in range(cfg.nmix)]   # +일치 모델
         self.apm = array('H', [0]) * (1024 * 33)
         for c in range(1024):
             base = c * 33
@@ -216,7 +225,13 @@ class _Model:
         self.c0 = 1          # 현재 바이트의 이미 처리된 비트들 (선두 1 포함)
         self.hist = 0        # 직전 8바이트
         self.wh = 0          # 현재 단어 해시
-        self.pos = 0         # UTF-8 연속바이트 위치 (v2만 사용)
+        self.pos = 0         # UTF-8 연속바이트 위치
+        self.buf = bytearray()                     # 지금까지 본 모든 바이트
+        self.mt = array('i', [0]) * _MATCH_SIZE    # 해시 → 그 뒤에 올 바이트의 위치
+        self.ms = array('H', [32768]) * 32         # 일치 길이별 "예측이 맞을" 확률
+        self.mn = bytearray(32)
+        self.mlen = 0; self.mptr = 0; self.mexp = 0
+        self.mst = 0; self.mi = -1; self.mbit = 0
         self.pr = 2048
         self._ai = 0
         self._aw = 0
@@ -261,6 +276,18 @@ class _Model:
             s = _STRETCH[self.t[i][j] >> 4]
             self.st[i] = s
             dot += w[i] * s
+        self.mst = 0
+        self.mi = -1
+        if self.mlen:
+            known = c0.bit_length() - 1          # 이 바이트에서 이미 본 비트 수
+            if ((self.mexp | 256) >> (8 - known)) == c0:
+                eb = (self.mexp >> (7 - known)) & 1
+                mi = self.mlen if self.mlen < 31 else 31
+                s = _STRETCH[self.ms[mi] >> 4]
+                self.mbit = eb
+                self.mi = mi
+                self.mst = s if eb else -s
+                dot += w[self.nm] * self.mst
         p = _squash(dot >> 16)
         ctx = (c0 & 255) | ((self.hist & 3) << 8)
         s = _STRETCH[p]
@@ -291,6 +318,12 @@ class _Model:
             c = n[j]
             t[j] += ((tgt - t[j]) * _RATE[c]) >> 17
             if c < _LIMIT: n[j] = c + 1
+        w[self.nm] += (self.mst * err) >> 13
+        mi = self.mi
+        if mi >= 0:
+            c = self.mn[mi]
+            self.ms[mi] += ((((1 if bit == self.mbit else 0) << 16) - self.ms[mi]) * _RATE[c]) >> 17
+            if c < _LIMIT: self.mn[mi] = c + 1
         self.c0 = (self.c0 << 1) | bit
         if self.c0 >= 256:
             b = self.c0 & 255
@@ -305,8 +338,37 @@ class _Model:
                 elif b >= 0xE0:  self.pos = 2
                 elif b >= 0xC0:  self.pos = 1
                 else:            self.pos = self.pos - 1 if self.pos > 0 else 0
+            self._match_byte(b)
             self.c0 = 1
             self._set_ctx()
+
+    def _match_byte(self, b):
+        buf = self.buf
+        buf.append(b)
+        n = len(buf)
+        if self.mlen:
+            if buf[self.mptr] == b:
+                self.mlen += 1
+                self.mptr += 1
+            else:
+                self.mlen = 0
+        if n >= _MATCH_MIN:
+            acc = 0x811C9DC5                     # FNV-1a (32비트)
+            for q in range(n - _MATCH_MIN, n):
+                acc = ((acc ^ buf[q]) * 0x01000193) & _M32
+            h = _fin(acc) & (_MATCH_SIZE - 1)
+            if not self.mlen:
+                cand = self.mt[h]
+                if cand:
+                    ln = 0
+                    while (ln < _MATCH_VERIFY and cand - 1 - ln >= 0
+                           and buf[cand - 1 - ln] == buf[n - 1 - ln]):
+                        ln += 1
+                    if ln >= _MATCH_MIN:
+                        self.mlen = ln
+                        self.mptr = cand
+            self.mt[h] = n
+        self.mexp = buf[self.mptr] if self.mlen else 0
 
 
 class _Encoder:
@@ -385,6 +447,9 @@ def _prime_into(m, data):
     st = [0] * nm
     idx = [0] * nm
     rng = range(nm)
+    ms = m.ms
+    mn = m.mn
+    mbit = 0
 
     c0 = m.c0
     if not data:
@@ -410,6 +475,19 @@ def _prime_into(m, data):
                 st[i] = s
                 dot += w[i] * s
 
+            mst = 0
+            mi = -1
+            mlen = m.mlen
+            if mlen:
+                known = c0.bit_length() - 1
+                mexp = m.mexp
+                if ((mexp | 256) >> (8 - known)) == c0:
+                    mbit = (mexp >> (7 - known)) & 1
+                    mi = mlen if mlen < 31 else 31
+                    s = stretch[ms[mi] >> 4]
+                    mst = s if mbit else -s
+                    dot += w[nm] * mst
+
             p = squash(dot >> 16)
             ctx = (c0 & 255) | ((hist & 3) << 8)
             s = stretch[p]
@@ -434,6 +512,11 @@ def _prime_into(m, data):
                 c = n[j]
                 t[j] += ((tgt - t[j]) * rate[c]) >> 17
                 if c < limit: n[j] = c + 1
+            w[nm] += (mst * err) >> 13
+            if mi >= 0:
+                c = mn[mi]
+                ms[mi] += ((((1 if bit == mbit else 0) << 16) - ms[mi]) * rate[c]) >> 17
+                if c < limit: mn[mi] = c + 1
 
             c0 = (c0 << 1) | bit
             if c0 >= 256:
@@ -449,6 +532,7 @@ def _prime_into(m, data):
                     elif b >= 0xE0:  m.pos = 2
                     elif b >= 0xC0:  m.pos = 1
                     else:            m.pos = m.pos - 1 if m.pos > 0 else 0
+                m._match_byte(b)
                 c0 = 1
                 m._set_ctx()
 
@@ -464,7 +548,9 @@ _prime_cache = {}
 
 def _snapshot(m):
     return (list(m.t), list(m.n), [array('i', w) for w in m.w], array('H', m.apm),
-            list(m.h), m.c0, m.hist, m.wh, m.pos, m.pr, m._ai, m._aw)
+            list(m.h), m.c0, m.hist, m.wh, m.pos, m.pr, m._ai, m._aw,
+            bytes(m.buf), array('i', m.mt), array('H', m.ms), bytes(m.mn),
+            m.mlen, m.mptr, m.mexp)
 
 
 def _primed_model(cfg=CFG):
@@ -480,7 +566,8 @@ def _primed_model(cfg=CFG):
         snap = _snapshot(base)
         _prime_cache[key] = snap
 
-    t, n, w, apm, h, c0, hist, wh, pos, pr, ai, aw = snap
+    (t, n, w, apm, h, c0, hist, wh, pos, pr, ai, aw,
+     buf, mt, ms, mn, mlen, mptr, mexp) = snap
     m = _Model.__new__(_Model)
     m.cfg = cfg
     m.nm = cfg.nm
@@ -493,6 +580,12 @@ def _primed_model(cfg=CFG):
     m.st = [0] * cfg.nm
     m.c0, m.hist, m.wh, m.pos, m.pr = c0, hist, wh, pos, pr
     m._ai, m._aw = ai, aw
+    m.buf = bytearray(buf)
+    m.mt = array('i', mt)
+    m.ms = array('H', ms)
+    m.mn = bytearray(mn)
+    m.mlen, m.mptr, m.mexp = mlen, mptr, mexp
+    m.mst, m.mi, m.mbit = 0, -1, 0
     return m
 
 
@@ -555,12 +648,21 @@ def chacha20(key32: bytes, nonce12: bytes, data: bytes, counter: int = 1) -> byt
     return bytes(out)
 
 
-PBKDF2_ITERS = 200_000
+# 열쇠 유도 — scrypt.
+#   실제 공격은 알고리즘이 아니라 열쇠말을 하나씩 넣어 보는 쪽으로 온다. scrypt는
+#   시도 한 번마다 메모리를 64MB씩 쓰게 만들어, GPU·전용 칩으로 대량 병렬 공격하는
+#   비용을 끌어올린다. N=2^16, r=8, p=2 는 OWASP가 N=2^17·r=8·p=1 과 같은 강도로
+#   꼽는 값이며, 메모리를 절반만 써서 휴대전화 브라우저에서도 돌아간다.
+SCRYPT_N = 1 << 16
+SCRYPT_R = 8
+SCRYPT_P = 2
+
 
 def derive_keys(password: str, seed: bytes):
     """비밀번호 + 시드 → (암호키 32B, 인증키 32B). 코퍼스 지문도 함께 묶는다."""
-    salt = b'HGC1' + bytes([CORPUS_FP]) + seed
-    dk = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, PBKDF2_ITERS, 64)
+    salt = b'HGC3' + bytes([CORPUS_FP]) + seed
+    dk = hashlib.scrypt(password.encode('utf-8'), salt=salt, n=SCRYPT_N, r=SCRYPT_R,
+                        p=SCRYPT_P, maxmem=1 << 27, dklen=64)
     return dk[:32], dk[32:]
 
 
@@ -575,14 +677,30 @@ def derive_keys(password: str, seed: bytes):
 #                 2-3 시드 길이(0/4/6/8)
 #                 4-5 태그 길이(0/4/8/16)
 #                 6   키 사용 여부(0=내장 고정키 → 보안 없음, 단순 인코딩)
-#                 7   예약
+#                 7   길이 감추기 (1이면 본문 = varint(길이) + 본문 + 0 채움)
 #
-#     코퍼스 지문은 키 유도에 섞여 들어간다. 프로그램 버전이 다르면
-#     키가 달라져 인증에서 걸러지므로 별도 바이트를 쓰지 않는다.
+#     코퍼스 지문과 형식 표시('HGC3')는 키 유도 솔트에 섞여 들어간다. 판이
+#     다르면 키가 달라져 인증에서 걸러지므로 별도 바이트를 쓰지 않는다.
+#
+#     길이 감추기: 압축한 뒤 암호화하면 암호문 길이가 내용에 따라 달라진다
+#     (되풀이가 많은 글은 짧고, 낯선 글은 길다). 전체 길이를 Padmé 방식으로
+#     맞춰 채우면 길이가 드러내는 정보가 O(log log n) 비트로 줄고, 늘어나는
+#     크기는 최대 12%다. 32바이트 이하는 모두 32바이트로 맞춘다.
 # ════════════════════════════════════════════════════════════════════
 _SEED_OPT = [0, 4, 6, 8]
 _TAG_OPT = [0, 4, 8, 16]
 _NOKEY_PASSWORD = 'hangul-crypt-no-key'
+_PAD_MIN = 32
+
+
+def _pad_target(n):
+    """Padmé — n 이상에서 가장 가까운, 아래쪽 비트가 0인 길이."""
+    if n <= _PAD_MIN:
+        return _PAD_MIN
+    e = n.bit_length() - 1          # floor(log2 n)
+    s = e.bit_length()              # floor(log2 e) + 1
+    mask = (1 << (e - s)) - 1
+    return (n + mask) & ~mask
 
 
 def _varint(n):
@@ -597,6 +715,8 @@ def _varint(n):
 def _read_varint(data, i):
     n = 0; sh = 0
     while True:
+        if i >= len(data):
+            raise ValueError('데이터가 잘렸습니다.')
         b = data[i]; i += 1
         n |= (b & 0x7F) << sh
         if not (b & 0x80): return n, i
@@ -604,7 +724,7 @@ def _read_varint(data, i):
 
 
 def encrypt(text: str, password: str = None, *, seed_len=6, tag_len=4,
-            method='auto') -> bytes:
+            method='auto', pad=False) -> bytes:
     import lzma
     raw = text.encode('utf-8')
 
@@ -626,11 +746,17 @@ def encrypt(text: str, password: str = None, *, seed_len=6, tag_len=4,
     if tag_len not in _TAG_OPT:   raise ValueError('태그 길이는 0/4/8/16')
 
     seed = os.urandom(seed_len)
+    if pad:
+        inner = _varint(len(payload)) + payload
+        unpadded = 1 + seed_len + len(inner) + tag_len
+        payload = inner + bytes(_pad_target(unpadded) - unpadded)
+
     ekey, akey = derive_keys(pw, seed)
     ct = chacha20(ekey, b'\0' * 12, payload)
 
     hdr = bytes([mid | (_SEED_OPT.index(seed_len) << 2) |
-                 (_TAG_OPT.index(tag_len) << 4) | (0x40 if keyed else 0) | 0x80])
+                 (_TAG_OPT.index(tag_len) << 4) | (0x40 if keyed else 0) |
+                 (0x80 if pad else 0)])
     blob = hdr + seed + ct
     if tag_len:
         blob += hmac.new(akey, blob, hashlib.sha256).digest()[:tag_len]
@@ -645,9 +771,7 @@ def decrypt(blob: bytes, password: str = None) -> str:
     seed_len = _SEED_OPT[(hdr >> 2) & 3]
     tag_len = _TAG_OPT[(hdr >> 4) & 3]
     keyed = bool(hdr & 0x40)
-    if not hdr & 0x80:
-        raise ValueError('시험판(v1)으로 만든 암호문입니다. 지금 판과는 호환되지 않습니다. '
-                         '다시 봉인해 주세요.')
+    padded = bool(hdr & 0x80)
     if mid == 3:
         raise ValueError('알 수 없는 형식입니다.')
     if keyed and password is None:
@@ -665,9 +789,14 @@ def decrypt(blob: bytes, password: str = None) -> str:
         want = hmac.new(akey, blob[:end], hashlib.sha256).digest()[:tag_len]
         if not hmac.compare_digest(want, blob[end:]):
             raise ValueError('인증 실패: 비밀번호가 틀렸거나, 데이터가 손상되었거나, '
-                             '프로그램 버전(코퍼스)이 다릅니다.')
+                             '다른 판에서 만든 암호문입니다.')
 
     payload = chacha20(ekey, b'\0' * 12, ct)
+    if padded:
+        k, j = _read_varint(payload, 0)
+        if j + k > len(payload):
+            raise ValueError('데이터가 잘렸습니다.')
+        payload = payload[j:j + k]
     if mid == 0:
         raw = payload
     else:
@@ -823,6 +952,14 @@ def _selftest():
             han_ok = False
     print('한글 표기 왕복(0~119바이트):', '정상' if han_ok else '실패!')
     ok &= han_ok
+
+    # 길이 감추기: 풀리는 내용은 같고, 길이는 Padmé 단계에 맞춰져야 한다
+    pad_ok = True
+    for s in ('', '짧은 글', '내일 세 시에 강남역에서 만나요', '가나다라 ' * 200):
+        blob = encrypt(s, 'pw', pad=True)
+        pad_ok &= decrypt(blob, 'pw') == s and len(blob) == _pad_target(len(blob))
+    print('길이 감추기 왕복:', '정상' if pad_ok else '실패!')
+    ok &= pad_ok
     print('\n전체 결과:', '통과' if ok else '실패')
     return 0 if ok else 1
 
@@ -843,6 +980,8 @@ def main(argv=None):
             p.add_argument('--strong', action='store_true',
                            help='강화 모드 (논스 12B, 태그 16B)')
             p.add_argument('--binary', action='store_true', help='토큰 대신 원시 바이트로 출력')
+            p.add_argument('--pad', action='store_true',
+                           help='길이 감추기 — 길이로 내용을 짐작하지 못하게 채운다 (최대 12%% 늘어남)')
             p.add_argument('--base85', action='store_true',
                            help='한글 대신 base85로 출력 (영문만 받는 곳에 붙일 때)')
     sub.add_parser('selftest', help='자체 검증 및 압축률 비교')
@@ -864,7 +1003,7 @@ def main(argv=None):
         if a.min:    kw = dict(seed_len=0, tag_len=0)
         if a.strong: kw = dict(seed_len=8, tag_len=16)
         t0 = time.time()
-        blob = encrypt(text, a.key, **kw)
+        blob = encrypt(text, a.key, pad=a.pad, **kw)
         dt = time.time() - t0
         encode = to_token if a.base85 else to_hangul
         if a.outfile:

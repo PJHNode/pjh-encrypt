@@ -60,7 +60,9 @@ def main():
     for s in SAMPLES:
         for i, (pw, opts) in enumerate((('테스트pw', {}), (None, {}),
                                         ('pw', {'seed_len': 0, 'tag_len': 0}),
-                                        ('pw', {'seed_len': 8, 'tag_len': 16}))):
+                                        ('pw', {'seed_len': 8, 'tag_len': 16}),
+                                        ('pw', {'pad': True}),
+                                        ('pw', {'seed_len': 0, 'tag_len': 0, 'pad': True}))):
             blob = hc.encrypt(s, pw, method='auto' if len(s) < 100 else 'cm', **opts)
             if blob[0] & 3 == 2:      # lzma가 이긴 경우는 cm으로 다시 만든다
                 blob = hc.encrypt(s, pw, method='cm', **opts)
@@ -77,6 +79,9 @@ def main():
                                'opts': {'seedLen': 0, 'tagLen': 0}})
     vectors['encrypt'].append({'text': '강화 모드', 'password': 'pw',
                                'opts': {'seedLen': 8, 'tagLen': 16}})
+    vectors['encrypt'].append({'text': '길이 감추기', 'password': 'pw', 'opts': {'pad': True}})
+    vectors['encrypt'].append({'text': '되풀이 되풀이 되풀이 되는 긴 글. ' * 30, 'password': 'pw',
+                               'opts': {'pad': True}})
 
     with tempfile.TemporaryDirectory() as td:
         vec_path = pathlib.Path(td) / 'vectors.json'
