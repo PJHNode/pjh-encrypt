@@ -18,7 +18,7 @@ self.onmessage = async function (e) {
     } else if (m.op === 'encrypt') {
       value = await HC.encrypt(m.text, m.password, m.opts);
     } else if (m.op === 'decrypt') {
-      value = await HC.decrypt(m.blob, m.password);
+      value = await HC.decrypt(m.blob, m.password, m.opts);
     } else {
       throw new Error('알 수 없는 작업입니다: ' + m.op);
     }

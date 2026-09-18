@@ -650,6 +650,148 @@
     return new Uint8Array(await webcrypto.subtle.sign('HMAC', k, data));
   }
 
+  async function sha256(data) {
+    return new Uint8Array(await webcrypto.subtle.digest('SHA-256', data));
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  //  공개키 — X25519 (RFC 7748) + HKDF-SHA256
+  //   받는 사람이 공개키를 한 번 알려 주면, 열쇠말을 따로 전하지 않고도 그 사람만 풀 수
+  //   있는 밀서를 보낼 수 있다. 봉인할 때마다 일회용 열쇠 쌍을 만들어 받는 사람의
+  //   공개키와 합의하고, 합의된 비밀에서 HKDF로 열쇠를 뽑는다.
+  //   Python과 같게 RFC 7748의 몽고메리 사다리를 BigInt로 옮겼다. BigInt 연산은 상수
+  //   시간이 아니다 — 개인 기기에서 쓰는 도구라는 전제다. 누가 보냈는지는 증명하지 않는다.
+  //   오래된 브라우저가 파일을 통째로 못 읽는 일이 없도록 BigInt 리터럴(1n)은 쓰지 않는다.
+  // ══════════════════════════════════════════════════════════════════
+  var _x25519 = null;
+
+  function x25519(k, u) {
+    if (!_x25519) {
+      if (typeof BigInt === 'undefined') throw new Error('이 브라우저는 공개키 봉인을 지원하지 않습니다.');
+      var ZERO = BigInt(0), ONE = BigInt(1), EIGHT = BigInt(8), FF = BigInt(255);
+      var P = (ONE << BigInt(255)) - BigInt(19), A24 = BigInt(121665);
+      var mod = function (a) { a %= P; return a < ZERO ? a + P : a; };
+      var powmod = function (b, e) {
+        var r = ONE; b = mod(b);
+        while (e > ZERO) { if (e & ONE) r = r * b % P; b = b * b % P; e >>= ONE; }
+        return r;
+      };
+      var toBig = function (bytes) {
+        var n = ZERO;
+        for (var i = 31; i >= 0; i--) n = (n << EIGHT) | BigInt(bytes[i]);
+        return n;
+      };
+      var toBytes = function (n) {
+        var out = new Uint8Array(32);
+        for (var i = 0; i < 32; i++) { out[i] = Number(n & FF); n >>= EIGHT; }
+        return out;
+      };
+      _x25519 = function (kIn, uIn) {
+        if (kIn.length !== 32 || uIn.length !== 32) throw new Error('X25519 입력은 32바이트여야 합니다.');
+        var kb = Uint8Array.from(kIn);
+        kb[0] &= 248; kb[31] &= 127; kb[31] |= 64;
+        var kn = toBig(kb);
+        var ub = Uint8Array.from(uIn);
+        ub[31] &= 127;
+        var x1 = toBig(ub), x2 = ONE, z2 = ZERO, x3 = x1, z3 = ONE, swap = 0, tmp;
+        for (var t = 254; t >= 0; t--) {
+          var kt = Number((kn >> BigInt(t)) & ONE);
+          swap ^= kt;
+          if (swap) { tmp = x2; x2 = x3; x3 = tmp; tmp = z2; z2 = z3; z3 = tmp; }
+          swap = kt;
+          var a = mod(x2 + z2), aa = a * a % P, b = mod(x2 - z2), bb = b * b % P;
+          var e = mod(aa - bb);
+          var c = mod(x3 + z3), d = mod(x3 - z3), da = d * a % P, cb = c * b % P;
+          var sum = (da + cb) % P, dif = mod(da - cb);
+          x3 = sum * sum % P;
+          z3 = x1 * dif % P * dif % P;
+          x2 = aa * bb % P;
+          z2 = e * ((aa + A24 * e) % P) % P;
+        }
+        if (swap) { tmp = x2; x2 = x3; x3 = tmp; tmp = z2; z2 = z3; z3 = tmp; }
+        return toBytes(x2 * powmod(z2, P - BigInt(2)) % P);
+      };
+    }
+    return _x25519(k, u);
+  }
+
+  var X25519_BASE = (function () { var b = new Uint8Array(32); b[0] = 9; return b; })();
+
+  async function hkdf(salt, ikm, info, len) {
+    var prk = await hmacSha256(salt, ikm);
+    var out = new Uint8Array(0), t = new Uint8Array(0), i = 1;
+    while (out.length < len) {
+      t = await hmacSha256(prk, concatBytes([t, info, new Uint8Array([i])]));
+      out = concatBytes([out, t]);
+      i++;
+    }
+    return out.slice(0, len);
+  }
+
+  async function pkKeys(shared, ePub, rPub) {
+    var zero = true;
+    for (var i = 0; i < 32; i++) if (shared[i]) { zero = false; break; }
+    if (zero) throw new Error('공개키가 올바르지 않습니다.');   // 작은 부분군의 점
+    var fp = await corpusFingerprint();
+    var okm = await hkdf(new Uint8Array([0x48, 0x47, 0x43, 0x33, 0x50, fp]),   // 'HGC3P'
+                         shared, concatBytes([ePub, rPub]), 64);
+    return [okm.slice(0, 32), okm.slice(32, 64)];
+  }
+
+  // 열쇠 표기: 종류 1B + 열쇠 32B + 체크섬 2B → 한글 23자.
+  // 종류 바이트가 공개키와 개인 열쇠를 가르고, 체크섬이 오타와 잘못 붙여 넣기를 잡는다.
+  var KEY_PUBLIC = 0x70, KEY_SECRET = 0x73;
+
+  async function keyToken(kind, key) {
+    var body = concatBytes([new Uint8Array([kind]), key]);
+    return toHangul(concatBytes([body, (await sha256(body)).slice(0, 2)]));
+  }
+
+  async function parseKey(token, kind) {
+    var what = kind === KEY_PUBLIC ? '공개키' : '개인 열쇠';
+    var raw;
+    try { raw = decodeToken(token); } catch (e) { throw new Error(what + '를 읽을 수 없습니다.'); }
+    if (raw.length !== 35) throw new Error(what + '가 손상되었습니다. 빠진 글자가 없는지 확인하세요.');
+    var h = await sha256(raw.slice(0, 33));
+    if (h[0] !== raw[33] || h[1] !== raw[34])
+      throw new Error(what + '가 손상되었습니다. 빠진 글자가 없는지 확인하세요.');
+    if (raw[0] !== kind)
+      throw new Error(what + '가 아니라 ' + (kind === KEY_PUBLIC ? '개인 열쇠' : '공개키') + '입니다.');
+    return raw.slice(1, 33);
+  }
+
+  async function generateKeyPair() {
+    var sk = new Uint8Array(32);
+    webcrypto.getRandomValues(sk);
+    return { secret: await keyToken(KEY_SECRET, sk),
+             public: await keyToken(KEY_PUBLIC, x25519(sk, X25519_BASE)) };
+  }
+
+  async function publicFromSecret(secret) {
+    return keyToken(KEY_PUBLIC, x25519(await parseKey(secret, KEY_SECRET), X25519_BASE));
+  }
+
+  // 공개키 지문 — 한글 네 자. 받은 공개키가 맞는지 목소리로 맞춰 보는 데 쓴다.
+  async function keyFingerprint(pub) {
+    var pk = await parseKey(pub, KEY_PUBLIC);
+    var h = await sha256(concatBytes([new TextEncoder().encode('HGC3 fingerprint'), pk]));
+    var acc = 0, nbits = 0, out = '';
+    for (var i = 0; i < 7 && out.length < 4; i++) {
+      acc = acc * 256 + h[i]; nbits += 8;
+      while (nbits >= 13 && out.length < 4) {
+        nbits -= 13;
+        var pw2 = Math.pow(2, nbits), v = Math.floor(acc / pw2);
+        acc -= v * pw2;
+        out += String.fromCharCode(0xAC00 + v);
+      }
+    }
+    return out.slice(0, 2) + ' ' + out.slice(2);
+  }
+
+  function isPublicKeyBlob(blob) {
+    return blob.length >= 2 && (blob[0] & 3) === 3 && (blob[1] >> 2) === 1;
+  }
+
   function timingSafeEqual(a, b) {
     if (a.length !== b.length) return false;
     var diff = 0;
@@ -684,7 +826,9 @@
     var tagLen = opts.tagLen === undefined ? 4 : opts.tagLen;
     var method = opts.method || 'auto';
     var pad = !!opts.pad;
+    var to = opts.to || null;
     if (password === undefined) password = null;
+    if (to !== null && password !== null) throw new Error('열쇠말과 공개키 중 하나만 쓰세요.');
 
     var raw = new TextEncoder().encode(text);
 
@@ -708,22 +852,31 @@
     if (SEED_OPT.indexOf(seedLen) < 0) throw new Error('시드 길이는 0/4/6/8');
     if (TAG_OPT.indexOf(tagLen) < 0) throw new Error('태그 길이는 0/4/8/16');
 
-    var seed = new Uint8Array(seedLen);
-    if (seedLen) webcrypto.getRandomValues(seed);
+    var keys, prefix, seed;
+    if (to !== null) {
+      var rPub = await parseKey(to, KEY_PUBLIC);
+      var eSk = new Uint8Array(32);
+      webcrypto.getRandomValues(eSk);
+      var ePub = x25519(eSk, X25519_BASE);
+      keys = await pkKeys(x25519(eSk, rPub), ePub, rPub);
+      prefix = concatBytes([new Uint8Array([
+        3 | (TAG_OPT.indexOf(tagLen) << 4) | 0x40 | (pad ? 0x80 : 0), mid | (1 << 2)]), ePub]);
+    } else {
+      seed = new Uint8Array(seedLen);
+      if (seedLen) webcrypto.getRandomValues(seed);
+      prefix = concatBytes([new Uint8Array([
+        mid | (SEED_OPT.indexOf(seedLen) << 2) | (TAG_OPT.indexOf(tagLen) << 4) |
+        (keyed ? 0x40 : 0) | (pad ? 0x80 : 0)]), seed]);
+    }
     if (pad) {
       var inner = concatBytes([varint(payload.length), payload]);
-      var unpadded = 1 + seedLen + inner.length + tagLen;
+      var unpadded = prefix.length + inner.length + tagLen;
       payload = concatBytes([inner, new Uint8Array(padTarget(unpadded) - unpadded)]);
     }
 
-    var keys = await deriveKeys(pw, seed);
+    if (to === null) keys = await deriveKeys(pw, seed);
     var ct = chacha20(keys[0], new Uint8Array(12), payload);
-
-    var hdr = new Uint8Array([
-      mid | (SEED_OPT.indexOf(seedLen) << 2) | (TAG_OPT.indexOf(tagLen) << 4) |
-      (keyed ? 0x40 : 0) | (pad ? 0x80 : 0)
-    ]);
-    var blob = concatBytes([hdr, seed, ct]);
+    var blob = concatBytes([prefix, ct]);
     if (tagLen) {
       var tag = await hmacSha256(keys[1], blob);
       blob = concatBytes([blob, tag.slice(0, tagLen)]);
@@ -731,34 +884,48 @@
     return blob;
   }
 
-  async function decrypt(blob, password) {
+  async function decrypt(blob, password, opts) {
     if (password === undefined) password = null;
+    var secret = (opts && opts.secret) || null;
     if (!blob || !blob.length) throw new Error('빈 데이터입니다.');
     var hdr = blob[0];
     var mid = hdr & 3;
-    var seedLen = SEED_OPT[(hdr >> 2) & 3];
     var tagLen = TAG_OPT[(hdr >> 4) & 3];
     var keyed = !!(hdr & 0x40);
     var padded = !!(hdr & 0x80);
-    if (mid === 3) throw new Error('알 수 없는 형식입니다.');
+    var keys, ct, end;
+
+    if (mid === 3) {
+      if (!isPublicKeyBlob(blob)) throw new Error('알 수 없는 형식입니다.');
+      if (secret === null) {
+        throw new Error('공개키로 봉인된 글입니다. 받는 사람의 개인 열쇠로 풀어야 합니다.');
+      }
+      mid = blob[1] & 3;
+      end = blob.length - tagLen;
+      if (end < 34) throw new Error('데이터가 잘렸습니다.');
+      var ePub = blob.slice(2, 34);
+      var sk = await parseKey(secret, KEY_SECRET);
+      keys = await pkKeys(x25519(sk, ePub), ePub, x25519(sk, X25519_BASE));
+      ct = blob.slice(34, end);
+    } else {
+      var seedLen = SEED_OPT[(hdr >> 2) & 3];
+      if (keyed && password === null) throw new Error('이 데이터는 비밀번호가 필요합니다.');
+      var pw = keyed ? password : NOKEY_PASSWORD;
+      var seed = blob.slice(1, 1 + seedLen);
+      end = blob.length - tagLen;
+      if (end < 1 + seedLen) throw new Error('데이터가 잘렸습니다.');
+      ct = blob.slice(1 + seedLen, end);
+      keys = await deriveKeys(pw, seed);
+    }
     if (mid === 2) {
       throw new Error('이 데이터는 lzma로 압축되어 있습니다. 브라우저에서는 풀 수 없으니 ' +
         'Python 버전(hangul_crypt.py dec)으로 복호화하세요.');
     }
-    if (keyed && password === null) throw new Error('이 데이터는 비밀번호가 필요합니다.');
-    var pw = keyed ? password : NOKEY_PASSWORD;
-
-    var seed = blob.slice(1, 1 + seedLen);
-    var end = blob.length - tagLen;
-    if (end < 1 + seedLen) throw new Error('데이터가 잘렸습니다.');
-    var ct = blob.slice(1 + seedLen, end);
-
-    var keys = await deriveKeys(pw, seed);
     if (tagLen) {
       var full = await hmacSha256(keys[1], blob.slice(0, end));
       if (!timingSafeEqual(full.slice(0, tagLen), blob.slice(end))) {
-        throw new Error('인증 실패: 비밀번호가 틀렸거나, 데이터가 손상되었거나, ' +
-          '다른 판에서 만든 암호문입니다.');
+        throw new Error('인증 실패: 비밀번호(또는 개인 열쇠)가 틀렸거나, 데이터가 ' +
+          '손상되었거나, 다른 판에서 만든 암호문입니다.');
       }
     }
 
@@ -918,6 +1085,12 @@
     CORPUS: CORPUS,
     CFG: CFG,
     SCRYPT: { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P },
+    x25519: x25519,
+    generateKeyPair: generateKeyPair,
+    publicFromSecret: publicFromSecret,
+    keyFingerprint: keyFingerprint,
+    parseKey: function (t, isSecret) { return parseKey(t, isSecret ? KEY_SECRET : KEY_PUBLIC); },
+    isPublicKeyBlob: isPublicKeyBlob,
     scrypt: scrypt,
     padTarget: padTarget,
     _prime: function (cfg) { return newPrimed(cfg); }

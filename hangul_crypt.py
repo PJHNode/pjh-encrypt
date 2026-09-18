@@ -19,6 +19,9 @@ hangul_crypt.js 와 바이트 단위로 호환된다 (tools/crosstest.py 가 검
   python hangul_crypt.py dec -k 비밀번호 "출력된암호문"   # 한글·base85 자동 인식
   python hangul_crypt.py enc -k pw --base85 "..."      # 영문만 받는 곳에 붙일 때
   python hangul_crypt.py enc -k pw --pad "..."         # 길이 감추기
+  python hangul_crypt.py keygen -o 내열쇠.txt            # 공개키 봉인용 열쇠 쌍
+  python hangul_crypt.py enc --to 공개키 "..."          # 공개키로 봉인
+  python hangul_crypt.py dec --secret-file 내열쇠.txt "암호문"
   python hangul_crypt.py enc -k pw -i 입력.txt -o 출력.hgc
   python hangul_crypt.py selftest
 """
@@ -667,6 +670,127 @@ def derive_keys(password: str, seed: bytes):
 
 
 # ════════════════════════════════════════════════════════════════════
+#  3-2. 공개키 — X25519 (RFC 7748) + HKDF-SHA256
+#
+#     받는 사람이 공개키를 한 번 알려 주면, 열쇠말을 따로 전하지 않고도 그 사람만
+#     풀 수 있는 밀서를 보낼 수 있다. 봉인할 때마다 일회용 열쇠 쌍을 만들어 받는
+#     사람의 공개키와 합의하고(ECDH), 합의된 비밀에서 HKDF로 열쇠를 뽑는다.
+#     합의된 비밀은 이미 충분히 무작위이므로 scrypt처럼 일부러 느리게 할 필요가 없다.
+#
+#     표준 라이브러리에 X25519가 없어 RFC 7748의 몽고메리 사다리를 그대로 옮겼다.
+#     공식 시험 벡터와 OpenSSL 결과로 검증한다. 정수 연산이 상수 시간이 아니므로
+#     같은 기기에서 복호화 시간을 수없이 잴 수 있는 공격자에게는 약할 수 있다 —
+#     개인 기기에서 쓰는 도구라는 전제다.
+#
+#     누가 보냈는지는 증명하지 않는다. 공개키만 알면 누구나 봉인해 보낼 수 있다.
+# ════════════════════════════════════════════════════════════════════
+_P25519 = (1 << 255) - 19
+_A24 = 121665
+
+
+def x25519(k: bytes, u: bytes) -> bytes:
+    """RFC 7748 X25519. k: 32바이트 비밀 스칼라, u: 32바이트 u 좌표."""
+    if len(k) != 32 or len(u) != 32:
+        raise ValueError('X25519 입력은 32바이트여야 합니다.')
+    kb = bytearray(k)
+    kb[0] &= 248
+    kb[31] &= 127
+    kb[31] |= 64
+    kn = int.from_bytes(kb, 'little')
+    x1 = int.from_bytes(u, 'little') & ((1 << 255) - 1)
+    P = _P25519
+    x2, z2, x3, z3 = 1, 0, x1, 1
+    swap = 0
+    for t in range(254, -1, -1):
+        kt = (kn >> t) & 1
+        swap ^= kt
+        if swap:
+            x2, x3 = x3, x2
+            z2, z3 = z3, z2
+        swap = kt
+        a = (x2 + z2) % P
+        aa = a * a % P
+        b = (x2 - z2) % P
+        bb = b * b % P
+        e = (aa - bb) % P
+        c = (x3 + z3) % P
+        d = (x3 - z3) % P
+        da = d * a % P
+        cb = c * b % P
+        x3 = (da + cb) * (da + cb) % P
+        z3 = x1 * (da - cb) * (da - cb) % P
+        x2 = aa * bb % P
+        z2 = e * (aa + _A24 * e) % P
+    if swap:
+        x2, x3 = x3, x2
+        z2, z3 = z3, z2
+    return (x2 * pow(z2, P - 2, P) % P).to_bytes(32, 'little')
+
+
+_X25519_BASE = (9).to_bytes(32, 'little')
+
+
+def _hkdf(salt: bytes, ikm: bytes, info: bytes, length: int = 64) -> bytes:
+    prk = hmac.new(salt, ikm, hashlib.sha256).digest()
+    out, t, i = b'', b'', 1
+    while len(out) < length:
+        t = hmac.new(prk, t + info + bytes([i]), hashlib.sha256).digest()
+        out += t
+        i += 1
+    return out[:length]
+
+
+def _pk_keys(shared: bytes, e_pub: bytes, r_pub: bytes):
+    if shared == bytes(32):
+        raise ValueError('공개키가 올바르지 않습니다.')   # 작은 부분군의 점
+    okm = _hkdf(b'HGC3P' + bytes([CORPUS_FP]), shared, e_pub + r_pub, 64)
+    return okm[:32], okm[32:]
+
+
+# 열쇠 표기: 종류 1B + 열쇠 32B + 체크섬 2B → 한글 23자.
+# 종류 바이트가 공개키와 개인 열쇠를 가르고, 체크섬이 오타와 잘못 붙여 넣기를 잡는다.
+_KEY_PUBLIC = 0x70     # 'p'
+_KEY_SECRET = 0x73     # 's'
+
+
+def _key_token(kind: int, key: bytes) -> str:
+    body = bytes([kind]) + key
+    return to_hangul(body + hashlib.sha256(body).digest()[:2])
+
+
+def _parse_key(token: str, kind: int) -> bytes:
+    what = '공개키' if kind == _KEY_PUBLIC else '개인 열쇠'
+    try:
+        raw = decode_token(token)
+    except Exception:
+        raise ValueError(f'{what}를 읽을 수 없습니다.')
+    if len(raw) != 35 or hashlib.sha256(raw[:33]).digest()[:2] != raw[33:]:
+        raise ValueError(f'{what}가 손상되었습니다. 빠진 글자가 없는지 확인하세요.')
+    if raw[0] != kind:
+        other = '개인 열쇠' if kind == _KEY_PUBLIC else '공개키'
+        raise ValueError(f'{what}가 아니라 {other}입니다.')
+    return raw[1:33]
+
+
+def generate_keypair():
+    """새 열쇠 쌍 → (개인 열쇠 표기, 공개키 표기)."""
+    sk = os.urandom(32)
+    return _key_token(_KEY_SECRET, sk), _key_token(_KEY_PUBLIC, x25519(sk, _X25519_BASE))
+
+
+def public_from_secret(secret: str) -> str:
+    return _key_token(_KEY_PUBLIC, x25519(_parse_key(secret, _KEY_SECRET), _X25519_BASE))
+
+
+def key_fingerprint(public: str) -> str:
+    """공개키 지문 — 한글 네 자. 받은 공개키가 맞는지 목소리로 맞춰 보는 데 쓴다."""
+    pk = _parse_key(public, _KEY_PUBLIC)
+    n = int.from_bytes(hashlib.sha256(b'HGC3 fingerprint' + pk).digest()[:7], 'big') >> 4
+    syl = [chr(_HAN_BASE + ((n >> (13 * (3 - i))) & 8191)) for i in range(4)]
+    return syl[0] + syl[1] + ' ' + syl[2] + syl[3]
+
+
+# ════════════════════════════════════════════════════════════════════
 #  4. 컨테이너 포맷
 #     헤더 1B | [시드 S B] | 암호문 | [태그 T B]
 #
@@ -681,6 +805,11 @@ def derive_keys(password: str, seed: bytes):
 #
 #     코퍼스 지문과 형식 표시('HGC3')는 키 유도 솔트에 섞여 들어간다. 판이
 #     다르면 키가 달라져 인증에서 걸러지므로 별도 바이트를 쓰지 않는다.
+#
+#     공개키 봉인은 방식 값 3을 '확장 헤더'로 쓴다:
+#       헤더 1B(방식=3) | 확장 1B(실제 방식 | 종류<<2, 종류 1=X25519) | 일회용 공개키 32B
+#       | 암호문 | [태그 T B]
+#     이때 헤더의 시드 길이는 0, 키 사용 비트는 1이다.
 #
 #     길이 감추기: 압축한 뒤 암호화하면 암호문 길이가 내용에 따라 달라진다
 #     (되풀이가 많은 글은 짧고, 낯선 글은 길다). 전체 길이를 Padmé 방식으로
@@ -724,9 +853,12 @@ def _read_varint(data, i):
 
 
 def encrypt(text: str, password: str = None, *, seed_len=6, tag_len=4,
-            method='auto', pad=False) -> bytes:
+            method='auto', pad=False, to=None) -> bytes:
+    """to 에 받는 사람의 공개키를 주면 열쇠말 대신 공개키로 봉인한다."""
     import lzma
     raw = text.encode('utf-8')
+    if to is not None and password is not None:
+        raise ValueError('열쇠말과 공개키 중 하나만 쓰세요.')
 
     # --- 압축 방식 선택: 셋 다 해보고 가장 짧은 것을 고른다 ---
     cands = []
@@ -745,51 +877,77 @@ def encrypt(text: str, password: str = None, *, seed_len=6, tag_len=4,
     if seed_len not in _SEED_OPT: raise ValueError('시드 길이는 0/4/6/8')
     if tag_len not in _TAG_OPT:   raise ValueError('태그 길이는 0/4/8/16')
 
-    seed = os.urandom(seed_len)
+    if to is not None:
+        r_pub = _parse_key(to, _KEY_PUBLIC)
+        e_sk = os.urandom(32)
+        e_pub = x25519(e_sk, _X25519_BASE)
+        ekey, akey = _pk_keys(x25519(e_sk, r_pub), e_pub, r_pub)
+        prefix = bytes([3 | (_TAG_OPT.index(tag_len) << 4) | 0x40 | (0x80 if pad else 0),
+                        mid | (1 << 2)]) + e_pub
+    else:
+        seed = os.urandom(seed_len)
+        prefix = bytes([mid | (_SEED_OPT.index(seed_len) << 2) |
+                        (_TAG_OPT.index(tag_len) << 4) | (0x40 if keyed else 0) |
+                        (0x80 if pad else 0)]) + seed
+
     if pad:
         inner = _varint(len(payload)) + payload
-        unpadded = 1 + seed_len + len(inner) + tag_len
+        unpadded = len(prefix) + len(inner) + tag_len
         payload = inner + bytes(_pad_target(unpadded) - unpadded)
 
-    ekey, akey = derive_keys(pw, seed)
+    if to is None:
+        ekey, akey = derive_keys(pw, seed)
     ct = chacha20(ekey, b'\0' * 12, payload)
-
-    hdr = bytes([mid | (_SEED_OPT.index(seed_len) << 2) |
-                 (_TAG_OPT.index(tag_len) << 4) | (0x40 if keyed else 0) |
-                 (0x80 if pad else 0)])
-    blob = hdr + seed + ct
+    blob = prefix + ct
     if tag_len:
         blob += hmac.new(akey, blob, hashlib.sha256).digest()[:tag_len]
     return blob
 
 
-def decrypt(blob: bytes, password: str = None) -> str:
+def is_public_key_blob(blob: bytes) -> bool:
+    return len(blob) >= 2 and blob[0] & 3 == 3 and blob[1] >> 2 == 1
+
+
+def decrypt(blob: bytes, password: str = None, *, secret: str = None) -> str:
+    """secret 에 개인 열쇠를 주면 공개키로 봉인된 글을 푼다."""
     import lzma
     if not blob: raise ValueError('빈 데이터입니다.')
     hdr = blob[0]
     mid = hdr & 3
-    seed_len = _SEED_OPT[(hdr >> 2) & 3]
     tag_len = _TAG_OPT[(hdr >> 4) & 3]
     keyed = bool(hdr & 0x40)
     padded = bool(hdr & 0x80)
+
     if mid == 3:
-        raise ValueError('알 수 없는 형식입니다.')
-    if keyed and password is None:
-        raise ValueError('이 데이터는 비밀번호가 필요합니다. -k 로 지정하세요.')
-    pw = password if keyed else _NOKEY_PASSWORD
-
-    seed = blob[1:1 + seed_len]
-    end = len(blob) - tag_len
-    if end < 1 + seed_len:
-        raise ValueError('데이터가 잘렸습니다.')
-    ct = blob[1 + seed_len:end]
-
-    ekey, akey = derive_keys(pw, seed)
+        if not is_public_key_blob(blob):
+            raise ValueError('알 수 없는 형식입니다.')
+        if secret is None:
+            raise ValueError('공개키로 봉인된 글입니다. 받는 사람의 개인 열쇠로 풀어야 합니다.')
+        mid = blob[1] & 3
+        head = 2 + 32
+        end = len(blob) - tag_len
+        if end < head:
+            raise ValueError('데이터가 잘렸습니다.')
+        e_pub = blob[2:head]
+        sk = _parse_key(secret, _KEY_SECRET)
+        ekey, akey = _pk_keys(x25519(sk, e_pub), e_pub, x25519(sk, _X25519_BASE))
+        ct = blob[head:end]
+    else:
+        seed_len = _SEED_OPT[(hdr >> 2) & 3]
+        if keyed and password is None:
+            raise ValueError('이 데이터는 비밀번호가 필요합니다. -k 로 지정하세요.')
+        pw = password if keyed else _NOKEY_PASSWORD
+        seed = blob[1:1 + seed_len]
+        end = len(blob) - tag_len
+        if end < 1 + seed_len:
+            raise ValueError('데이터가 잘렸습니다.')
+        ct = blob[1 + seed_len:end]
+        ekey, akey = derive_keys(pw, seed)
     if tag_len:
         want = hmac.new(akey, blob[:end], hashlib.sha256).digest()[:tag_len]
         if not hmac.compare_digest(want, blob[end:]):
-            raise ValueError('인증 실패: 비밀번호가 틀렸거나, 데이터가 손상되었거나, '
-                             '다른 판에서 만든 암호문입니다.')
+            raise ValueError('인증 실패: 비밀번호(또는 개인 열쇠)가 틀렸거나, 데이터가 '
+                             '손상되었거나, 다른 판에서 만든 암호문입니다.')
 
     payload = chacha20(ekey, b'\0' * 12, ct)
     if padded:
@@ -960,6 +1118,22 @@ def _selftest():
         pad_ok &= decrypt(blob, 'pw') == s and len(blob) == _pad_target(len(blob))
     print('길이 감추기 왕복:', '정상' if pad_ok else '실패!')
     ok &= pad_ok
+
+    # 공개키: RFC 7748 시험 벡터, 왕복, 다른 열쇠 거부
+    a_sk = bytes.fromhex('77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a')
+    b_pk = bytes.fromhex('de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f')
+    pk_ok = x25519(a_sk, b_pk).hex() == ('4a5d9d5ba4ce2de1728e3bf480350f25'
+                                          'e07e21c947d19e3376f09b3c1e161742')
+    sk, pk = generate_keypair()
+    for s in ('', '공개키로 봉인한 밀서'):
+        pk_ok &= decrypt(encrypt(s, to=pk), secret=sk) == s
+    try:
+        decrypt(encrypt('남의 글', to=pk), secret=generate_keypair()[0])
+        pk_ok = False
+    except ValueError:
+        pass
+    print('공개키 봉인 (RFC 7748 · 왕복 · 다른 열쇠 거부):', '정상' if pk_ok else '실패!')
+    ok &= pk_ok
     print('\n전체 결과:', '통과' if ok else '실패')
     return 0 if ok else 1
 
@@ -984,11 +1158,33 @@ def main(argv=None):
                            help='길이 감추기 — 길이로 내용을 짐작하지 못하게 채운다 (최대 12%% 늘어남)')
             p.add_argument('--base85', action='store_true',
                            help='한글 대신 base85로 출력 (영문만 받는 곳에 붙일 때)')
+            p.add_argument('--to', metavar='공개키',
+                           help='받는 사람의 공개키로 봉인 (열쇠말 대신)')
+        else:
+            p.add_argument('--secret', metavar='개인열쇠',
+                           help='공개키로 봉인된 글을 내 개인 열쇠로 푼다')
+            p.add_argument('--secret-file', metavar='파일',
+                           help='개인 열쇠가 적힌 파일 (명령줄 기록에 남기지 않으려면 이쪽)')
     sub.add_parser('selftest', help='자체 검증 및 압축률 비교')
+    kg = sub.add_parser('keygen', help='공개키 봉인용 새 열쇠 쌍 만들기')
+    kg.add_argument('-o', '--out', dest='outfile', metavar='파일',
+                    help='개인 열쇠를 이 파일에 저장 (화면에는 공개키만 보여 준다)')
 
     a = ap.parse_args(argv)
     if a.cmd == 'selftest':
         return _selftest()
+    if a.cmd == 'keygen':
+        sk, pk = generate_keypair()
+        if a.outfile:
+            with open(a.outfile, 'w', encoding='utf-8', newline='') as f:
+                f.write(sk + '\n')
+            print(f'개인 열쇠를 {a.outfile} 에 저장했습니다. 이 파일은 남에게 보이지 마세요.',
+                  file=sys.stderr)
+        else:
+            print(f'개인 열쇠  {sk}   ← 남에게 절대 보이지 마세요')
+        print(f'공개키     {pk}   ← 봉인해 받을 사람에게 알려 주세요')
+        print(f'지문       {key_fingerprint(pk)}   ← 받은 쪽과 목소리로 맞춰 보세요')
+        return 0
 
     if a.infile:
         data = open(a.infile, 'rb').read()
@@ -1002,8 +1198,11 @@ def main(argv=None):
         kw = dict(seed_len=6, tag_len=4)
         if a.min:    kw = dict(seed_len=0, tag_len=0)
         if a.strong: kw = dict(seed_len=8, tag_len=16)
+        if a.to and a.key:
+            print('열쇠말(-k)과 공개키(--to) 중 하나만 쓰세요.', file=sys.stderr)
+            return 2
         t0 = time.time()
-        blob = encrypt(text, a.key, pad=a.pad, **kw)
+        blob = encrypt(text, a.key, pad=a.pad, to=a.to, **kw)
         dt = time.time() - t0
         encode = to_token if a.base85 else to_hangul
         if a.outfile:
@@ -1024,11 +1223,15 @@ def main(argv=None):
         print(f'[원문 {len(data)}B → {len(blob)}B  ({r:.1%}, {dt:.1f}초, '
               f'{len(encode(blob))}글자)]', file=sys.stderr)
     else:
+        secret = a.secret
+        if a.secret_file:
+            with open(a.secret_file, encoding='utf-8') as f:
+                secret = f.read().strip()
         text = None
         errs = []
         for blob in _input_candidates(data):
             try:
-                text = decrypt(blob, a.key); break
+                text = decrypt(blob, a.key, secret=secret); break
             except Exception as e:
                 errs.append(str(e))
         if text is None:

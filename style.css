@@ -329,3 +329,23 @@ code {
 .check input { flex: none; margin: 5px 0 0; width: 15px; height: 15px; accent-color: var(--seal); }
 .check .name { display: block; font-weight: 700; }
 .check .hint { display: block; font-size: .72rem; color: var(--ink-dim); line-height: 1.5; }
+
+/* ── 공개키 ─────────────────────────────────── */
+[hidden] { display: none !important; }
+.seg.wide { display: flex; width: 100%; margin-bottom: 10px; }
+.seg.wide button { flex: 1; padding: 9px 8px; font-size: .84rem; }
+.keyline { margin: 8px 0 0; font-size: .8rem; color: var(--ink-dim); min-height: 1.2em; }
+.keyline b { color: var(--ink-mid); letter-spacing: .12em; }
+.keyline.bad { color: var(--seal); }
+textarea.short { min-height: 64px; }
+.explain { margin: 0 0 20px; font-size: .88rem; color: var(--ink-mid); }
+.fold { margin-top: 18px; border-top: 1px dotted var(--rule-soft); padding-top: 12px; }
+.fold summary { cursor: pointer; font-size: .82rem; color: var(--gold); font-weight: 700;
+                letter-spacing: .08em; }
+.fold[open] summary { margin-bottom: 14px; }
+.fold-tools { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.fold-tools .ghost, .ghost.wide { padding: 8px 14px; }
+.ghost.wide { width: 100%; }
+.ghost.danger { color: var(--seal); border-color: var(--seal); }
+#keyPanel .msg { margin-top: 14px; }
+#keyPanel .note { margin-top: 12px; font-style: normal; }

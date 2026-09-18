@@ -43,17 +43,32 @@
     <div class="tabs" role="tablist">
       <button role="tab" id="tab-enc" aria-selected="true"><span class="han">封</span>봉인</button>
       <button role="tab" id="tab-dec" aria-selected="false"><span class="han">解</span>해독</button>
+      <button role="tab" id="tab-key" aria-selected="false"><span class="han">鑰</span>열쇠</button>
     </div>
 
     <div class="notice" id="notice" role="status"></div>
 
+    <div id="sealPanel">
     <div class="field">
       <label for="inputText" id="inputLabel">숨길 글</label>
       <textarea id="inputText" placeholder="여기에 적으십시오" spellcheck="false"></textarea>
     </div>
 
-    <div class="field">
-      <label for="pw">열쇠말</label>
+    <div class="field" id="toField">
+      <label>받는 사람</label>
+      <div class="seg wide" role="group" aria-label="잠그는 방법">
+        <button type="button" id="viaPw" aria-pressed="true">열쇠말로 잠그기</button>
+        <button type="button" id="viaPk" aria-pressed="false">공개키로 잠그기</button>
+      </div>
+      <div id="toKeyWrap" hidden>
+        <input type="text" id="toKey" class="cipher" autocomplete="off" spellcheck="false"
+               placeholder="받는 사람의 공개키(또는 「내게 보내기」 링크)를 붙여 넣으십시오">
+        <p class="keyline" id="toFp"></p>
+      </div>
+    </div>
+
+    <div class="field" id="pwField">
+      <label for="pw" id="pwLabel">열쇠말</label>
       <div class="pw-row">
         <input type="password" id="pw" placeholder="비워 두면 자물쇠 없이 눌러 담기만 합니다"
                autocomplete="off" spellcheck="false">
@@ -113,6 +128,66 @@
     </div>
 
     <div class="msg" id="error"></div>
+    </div>
+
+    <div id="keyPanel" hidden>
+      <div id="keyNone">
+        <p class="explain">공개키로 잠그면 <b>열쇠말을 따로 전하지 않아도</b> 받는 사람만 풀 수
+          있습니다. 먼저 내 열쇠를 만들고, 공개키를 밀서를 보내 줄 사람에게 알려 주십시오.
+          개인 열쇠는 아래 보관 열쇠말로 잠가 이 기기에만 둡니다.</p>
+        <div class="field">
+          <label for="vaultPw">보관 열쇠말</label>
+          <div class="pw-row">
+            <input type="password" id="vaultPw" autocomplete="new-password" spellcheck="false"
+                   placeholder="이 기기에 개인 열쇠를 잠가 둘 열쇠말">
+          </div>
+          <div class="meter" id="vaultMeter" data-level="0" aria-live="polite">
+            <span class="bar"><span id="vaultFill"></span></span>
+            <span id="vaultText"></span>
+          </div>
+        </div>
+        <button class="go" id="keyGen">새 열쇠 만들기</button>
+        <details class="fold">
+          <summary>가지고 있던 개인 열쇠 불러오기</summary>
+          <div class="field">
+            <label for="importSecret">개인 열쇠</label>
+            <input type="text" id="importSecret" class="cipher" autocomplete="off" spellcheck="false"
+                   placeholder="백업해 둔 개인 열쇠 (위 보관 열쇠말로 다시 잠급니다)">
+          </div>
+          <button type="button" class="ghost wide" id="keyImport">불러오기</button>
+        </details>
+      </div>
+
+      <div id="keyHave" hidden>
+        <div class="field">
+          <div class="result-head">
+            <label for="myPub">내 공개키</label>
+            <div class="head-tools">
+              <button type="button" class="ghost" id="pubLink" title="이 링크를 연 사람은 곧바로 나에게 밀서를 쓸 수 있습니다">내게 보내기 링크</button>
+              <button type="button" class="ghost" id="pubCopy">베끼기</button>
+            </div>
+          </div>
+          <textarea id="myPub" class="cipher short" readonly spellcheck="false"></textarea>
+          <p class="keyline" id="myFp"></p>
+        </div>
+        <details class="fold">
+          <summary>개인 열쇠 백업 · 이 기기에서 지우기</summary>
+          <div class="field">
+            <label for="backupPw">보관 열쇠말</label>
+            <input type="password" id="backupPw" autocomplete="off" spellcheck="false"
+                   placeholder="열쇠를 만들 때 쓴 보관 열쇠말">
+          </div>
+          <div class="fold-tools">
+            <button type="button" class="ghost" id="backupShow">개인 열쇠 보기</button>
+            <button type="button" class="ghost danger" id="keyForget">이 기기에서 지우기</button>
+          </div>
+          <textarea id="backupOut" class="cipher short" readonly spellcheck="false" hidden></textarea>
+        </details>
+      </div>
+
+      <p class="note" id="keyNote"></p>
+      <div class="msg" id="keyError"></div>
+    </div>
   </div>
 
   <footer>
@@ -135,6 +210,10 @@
         반 초쯤 걸리는 것은 느린 것이 아니라 <b>일부러 더디게 만든 것</b>입니다. 그래도 짧은
         열쇠말은 뚫립니다. 열쇠말 아래의 굳기 표시는 GPU 100장으로 공격할 때의 대략적인 평균
         시간입니다. <b>낱말 네댓 개를 띄어 쓰면</b> 외우기 쉬우면서도 뚫기 어렵습니다.</li>
+      <li>「열쇠」 탭에서 내 열쇠를 만들면 <b>공개키로 잠그기</b>를 쓸 수 있습니다. 공개키는
+        알려져도 괜찮고, 그걸로 잠근 글은 내 개인 열쇠로만 풀립니다. 받은 공개키가 맞는지는
+        <b>지문 네 글자</b>를 상대와 목소리로 맞춰 보면 확인할 수 있습니다. 공개키로 잠근 글은
+        누가 보냈는지까지 증명하지는 않습니다.</li>
       <li>「길이 감추기」를 켜면 암호문 길이가 정해진 단계로만 드러납니다. 압축한 뒤 암호화하는
         방식이라, 켜지 않으면 되풀이가 많은 글은 짧고 낯선 글은 길게 나와 길이만으로 내용을
         조금 짐작할 수 있습니다.</li>

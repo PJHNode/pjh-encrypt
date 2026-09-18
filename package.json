@@ -1,0 +1,11 @@
+{
+  "name": "pjh-encrypt",
+  "private": true,
+  "description": "밀서 — 한글 초압축 + 암호화. 이 파일은 브라우저 자동 검사(Playwright)용이다.",
+  "scripts": {
+    "test:browsers": "node tools/browser-test.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.55.0"
+  }
+}
