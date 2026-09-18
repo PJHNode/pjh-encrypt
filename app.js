@@ -708,4 +708,17 @@ receiveFromHash();
 
 // 첫 봉인을 기다리지 않도록 뒤에서 예열을 미리 해 둔다 (Worker일 때만)
 if (engine.inWorker()) engine.prime().catch(function () { /* 봉인할 때 다시 한다 */ });
+
+// ── 오프라인 앱 ────────────────────────────────────────────────
+//  서비스 워커가 페이지·글꼴을 모두 담아 두어 인터넷 없이도 열린다.
+//  한 파일 판(milseo.html)에는 매니페스트가 없으므로 등록하지 않는다.
+if ('serviceWorker' in navigator && document.querySelector('link[rel="manifest"]')) {
+  var hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.register('sw.js').catch(function () { /* 오프라인만 못 쓸 뿐이다 */ });
+  navigator.serviceWorker.addEventListener('controllerchange', function () {
+    if (!hadController) { hadController = true; return; }   // 처음 설치된 것일 뿐
+    notice.textContent = '새 판을 받았습니다. 새로고침하면 적용됩니다.';
+    notice.classList.add('show');
+  });
+}
 })();

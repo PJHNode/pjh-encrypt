@@ -1,0 +1,57 @@
+# push할 때마다 전부 검사한다.
+#  - 만들어진 파일(milseo.html, sw.js)이 원본과 맞는지
+#  - Python 자체 검사, Python ↔ JS 교차 검사
+#  - Chromium · Firefox · WebKit(사파리 엔진)에서 실제 페이지 조작
+# 한 브라우저에서만 보다가 다른 브라우저에서 깨진 일이 실제로 있었다.
+name: 검사
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  PYTHONUTF8: '1'
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  core:
+    name: Python · JS 교차 검사
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: 만들어진 파일이 최신인가
+        run: python tools/build.py --check
+      - name: Python 자체 검사
+        run: python hangul_crypt.py selftest
+      - name: Python ↔ JS 교차 검사
+        run: python tools/crosstest.py
+
+  browsers:
+    name: 브라우저 (${{ matrix.browser }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps ${{ matrix.browser }}
+      - name: 실제 페이지 조작 검사
+        run: node tools/browser-test.mjs
+        env:
+          BROWSERS: ${{ matrix.browser }}

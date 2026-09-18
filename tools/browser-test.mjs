@@ -14,7 +14,7 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ENGINES = { chromium, firefox, webkit };
@@ -273,6 +273,57 @@ async function runEngine(name) {
 
   check(errors.length === 0, '페이지 오류 없음' + (errors.length ? ': ' + errors.join(' | ') : ''));
   check(foreign.length === 0, '외부 요청 없음' + (foreign.length ? ': ' + foreign.join(', ') : ''));
+
+  // 9. 오프라인 — 서비스 워커가 담아 둔 것만으로 열리고 봉인되는가
+  //    Playwright는 Chromium에서만 서비스 워커를 온전히 다룬다
+  if (name === 'chromium') {
+    await open();
+    await page.evaluate(() => navigator.serviceWorker.ready);
+    await page.reload();
+    await page.waitForFunction(() => !!navigator.serviceWorker.controller);
+    const cached = await page.evaluate(async () => {
+      const keys = await caches.keys();
+      const c = await caches.open(keys.find((k) => k.startsWith('milseo-')));
+      return (await c.keys()).length;
+    });
+    check(cached > 190, '서비스 워커가 파일을 담아 둠 (' + cached + '개)');
+    await context.setOffline(true);
+    await page.goto('about:blank');
+    await page.goto(ORIGIN + '/index.html');
+    await page.waitForFunction(() => document.getElementById('meterText').textContent.length > 0);
+    await $('inputText').fill('인터넷이 끊겨도');
+    await $('pw').fill('offline-pw');
+    r = await go();
+    const offDec = r.out ? pyDecrypt(r.out, { password: 'offline-pw' }) : '';
+    check(offDec === '인터넷이 끊겨도', '인터넷을 끊고도 열리고 봉인됨');
+    check(await page.evaluate(() => document.fonts.check('16px "Gowun Batang"', '밀서')),
+          '오프라인에서도 명조 글꼴');
+    await context.setOffline(false);
+  }
+
+  // 10. 한 파일 판 — 내려받아 file:// 로 열었을 때
+  const single = await context.newPage();
+  single.setDefaultTimeout(90000);
+  const singleErrors = [];
+  single.on('pageerror', (e) => singleErrors.push(e.message));
+  await single.goto(pathToFileURL(path.join(ROOT, 'milseo.html')).href);
+  await single.waitForFunction(() => document.getElementById('meterText').textContent.length > 0);
+  const sPwned = await single.evaluate(() => {
+    const s = document.createElement('script');
+    s.textContent = 'window.__pwned = true;';
+    document.body.appendChild(s);
+    return new Promise((res) => setTimeout(() => res(!!window.__pwned), 100));
+  });
+  check(!sPwned, '한 파일 판: CSP가 주입 스크립트를 막음');
+  await single.fill('#inputText', '한 파일 판으로 봉인');
+  await single.fill('#pw', 'single-pw');
+  await single.click('#go');
+  await single.waitForFunction(() => document.getElementById('result').classList.contains('show') ||
+                                     document.getElementById('error').classList.contains('show'));
+  const sOut = await single.inputValue('#output');
+  check(sOut && pyDecrypt(sOut, { password: 'single-pw' }) === '한 파일 판으로 봉인',
+        'file://로 연 한 파일 판에서 봉인 → Python 해독');
+  check(singleErrors.length === 0, '한 파일 판 오류 없음' + (singleErrors.length ? ': ' + singleErrors.join(' | ') : ''));
   await browser.close();
 }
 

@@ -349,3 +349,5 @@ textarea.short { min-height: 64px; }
 .ghost.danger { color: var(--seal); border-color: var(--seal); }
 #keyPanel .msg { margin-top: 14px; }
 #keyPanel .note { margin-top: 12px; font-style: normal; }
+
+code.hash { word-break: break-all; font-size: .8em; }

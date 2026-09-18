@@ -5,12 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>밀서 密書</title>
 <meta name="description" content="한글 텍스트를 잘게 압축해서 암호로 봉인합니다. 모든 처리는 브라우저 안에서만 이루어집니다.">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🗝️</text></svg>">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#8c2f24">
 <!-- 외부로 나가는 요청을 막는다. 글꼴까지 이 레포에서 불러오므로 페이지를 여는 순간부터
      어떤 요청도 다른 곳으로 가지 않는다. 스크립트 주입에 대한 방어도 한 겹 더해진다. -->
 <meta http-equiv="Content-Security-Policy"
       content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self';
-               img-src 'self' data:; worker-src 'self'; connect-src 'none';
+               img-src 'self' data:; worker-src 'self'; manifest-src 'self'; connect-src 'none';
                base-uri 'none'; form-action 'none'">
 <link rel="stylesheet" href="fonts/fonts.css">
 <link rel="stylesheet" href="style.css">
@@ -217,6 +220,10 @@
       <li>「길이 감추기」를 켜면 암호문 길이가 정해진 단계로만 드러납니다. 압축한 뒤 암호화하는
         방식이라, 켜지 않으면 되풀이가 많은 글은 짧고 낯선 글은 길게 나와 길이만으로 내용을
         조금 짐작할 수 있습니다.</li>
+      <li>한 번 열면 <b>인터넷 없이도</b> 쓸 수 있고, 휴대전화에서는 홈 화면에 앱처럼 둘 수
+        있습니다. 이 사이트가 앞으로 바뀌더라도 지금 판을 그대로 쓰고 싶다면
+        <a href="milseo.html" download>한 파일로 내려받아</a> 두십시오. 내려받은 파일의
+        SHA-256은 <code class="hash" id="singleHash">f7c3425de8b756681c3bdc12a450ca32922fb7b3c0707fca0f5f3dc27cd9fcfc</code> 입니다.</li>
       <li>바탕이 되는 글과 풀이: <a href="https://github.com/PJHNode/pjh-encrypt">github.com/PJHNode/pjh-encrypt</a></li>
     </ol>
     <p class="colophon">封 緘 之 書</p>

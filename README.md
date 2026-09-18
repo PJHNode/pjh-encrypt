@@ -6,6 +6,10 @@
 짧은 한글 문장에서도 gzip/bzip2/xz보다 훨씬 작게 줄어듭니다.
 
 **웹에서 바로 쓰기 → [pjhnode.github.io/pjh-encrypt](https://pjhnode.github.io/pjh-encrypt/)**
+· 한 번 열면 인터넷 없이도 열리고, 휴대전화 홈 화면에 앱처럼 둘 수 있습니다.
+· [한 파일로 내려받기](https://pjhnode.github.io/pjh-encrypt/milseo.html) — 사이트가 바뀌어도 지금 판 그대로 씁니다.
+
+[![검사](https://github.com/PJHNode/pjh-encrypt/actions/workflows/test.yml/badge.svg)](https://github.com/PJHNode/pjh-encrypt/actions/workflows/test.yml)
 
 Python 구현(`hangul_crypt.py`)과 JavaScript 구현(`hangul_crypt.js`)이 있으며, 둘은
 바이트 단위로 호환됩니다. 웹에서 만든 토큰을 CLI로 풀 수 있고 그 반대도 됩니다.
@@ -33,6 +37,10 @@ python hangul_crypt.py dec -k 비밀번호 "출력된암호문"        # 한글�
 
 python hangul_crypt.py enc -k pw --base85 "..."          # 영문만 받는 곳에 붙일 때
 python hangul_crypt.py enc -k pw --pad "..."             # 길이 감추기
+
+python hangul_crypt.py keygen -o 내열쇠.txt               # 공개키 봉인용 열쇠 쌍
+python hangul_crypt.py enc --to 공개키 "..."              # 받는 사람 공개키로 봉인
+python hangul_crypt.py dec --secret-file 내열쇠.txt "..."  # 내 개인 열쇠로 풀기
 python hangul_crypt.py enc -k pw -i 일기.txt -o 일기.hgc
 python hangul_crypt.py dec -k pw -i 일기.hgc
 
@@ -58,8 +66,10 @@ blob  = encrypt('숨길 내용', '비밀번호')     # bytes
 
 | 함수 | 설명 |
 |---|---|
-| `encrypt(text, password=None, *, seed_len=6, tag_len=4, method='auto', pad=False)` | 압축 + 암호화 → `bytes` |
-| `decrypt(blob, password=None)` | 복호화 + 압축 해제 → `str` |
+| `encrypt(text, password=None, *, seed_len=6, tag_len=4, method='auto', pad=False, to=None)` | 압축 + 암호화 → `bytes`. `to`에 공개키를 주면 공개키로 봉인 |
+| `decrypt(blob, password=None, *, secret=None)` | 복호화 + 압축 해제 → `str`. 공개키 암호문은 `secret`(개인 열쇠)으로 |
+| `generate_keypair()` | 새 열쇠 쌍 → `(개인 열쇠, 공개키)` 한글 표기 |
+| `public_from_secret(secret)` / `key_fingerprint(public)` | 개인 열쇠에서 공개키 / 공개키 지문(한글 네 자) |
 | `to_hangul(blob)` / `from_hangul(text)` | 한글 표기 (13비트/글자) |
 | `to_token(blob)` / `from_token(text)` | base85 표기 (6.4비트/글자) |
 | `decode_token(text)` | 한글인지 base85인지 가려서 읽는다 |
@@ -134,7 +144,9 @@ https://pjhnode.github.io/pjh-encrypt/#s=2f2nj0f7ldj_BMXMeWxSYUPzt8dMrDyzSQ
 Node.js에서도 그대로 씁니다: `const HC = require('./hangul_crypt.js')`.
 
 HMAC·SHA-256과 scrypt의 바깥 단계(PBKDF2 1회)는 WebCrypto를 쓰기 때문에 함수가 비동기이고,
-**보안 컨텍스트(HTTPS 또는 localhost)가 필요**합니다. `file://`로 열면 `crypto.subtle`이 없어 동작하지 않습니다.
+**보안 컨텍스트가 필요**합니다. HTTPS·localhost·`file://`이 모두 해당합니다 — 한 파일 판을
+내려받아 `file://`로 열어도 세 엔진에서 동작하는 것을 자동 검사로 확인합니다. (예전에 이 README에
+"`file://`에서는 동작하지 않는다"고 적었는데, 확인하지 않고 쓴 틀린 말이었습니다.)
 
 ### Python 구현과의 차이
 
@@ -160,6 +172,71 @@ python tools/sync_corpus.py   # .py의 코퍼스를 .js로 복사
 > 코퍼스는 두 구현이 반드시 같아야 합니다. `hangul_crypt.py`의 `CORPUS`를 고쳤다면
 > `tools/sync_corpus.py`를 실행해 JS 쪽을 맞추세요. JS에는 `\uXXXX`로 이스케이프되어
 > 들어가므로, 파일이 어떤 인코딩으로 해석되든 코퍼스 바이트는 달라지지 않습니다.
+
+## 공개키로 잠그기
+
+열쇠말로 잠그면 열쇠말을 **다른 길로** 전해야 하는 번거로움이 있습니다. 공개키로 잠그면 그럴
+필요가 없습니다.
+
+1. 받을 사람이 「열쇠」 탭에서 **내 열쇠**를 만들고, 공개키(한글 23자)나 「내게 보내기」 링크를
+   알려 줍니다. 공개키는 알려져도 괜찮습니다.
+2. 보내는 사람은 봉인할 때 「공개키로 잠그기」를 고르고 그 공개키를 붙여 넣습니다. 링크로
+   들어왔다면 이미 채워져 있습니다.
+3. 받은 사람은 해독 칸에 붙여 넣고 **보관 열쇠말**을 넣으면 풀립니다.
+
+```
+공개키  찉먌앰뭐쉞꿎쪛됈씱쪂묭뛕뇱껡뺛뛈댽롪습뭋굑짘룀   (23자)
+지문    솞끩 뺰쨼                                        ← 목소리로 맞춰 보기
+```
+
+- **X25519**(RFC 7748)로 봉인할 때마다 일회용 열쇠 쌍을 만들어 받는 사람의 공개키와 합의하고,
+  **HKDF-SHA256**으로 열쇠를 뽑습니다. 합의된 비밀은 이미 무작위라 scrypt가 필요 없어 빠릅니다(약 30ms).
+- 파이썬 표준 라이브러리에 X25519가 없어 몽고메리 사다리를 Python(정수)과 JS(BigInt)로
+  직접 옮겼습니다. RFC 7748 공식 시험 벡터와 OpenSSL 무작위 30쌍으로 검증했습니다.
+- 열쇠 표기는 종류 1바이트 + 열쇠 32바이트 + 체크섬 2바이트입니다. 한 글자가 빠지거나,
+  공개키를 개인 열쇠 칸에 넣는 실수를 알아챕니다.
+- **지문 네 글자**를 상대와 목소리로 맞춰 보면, 중간에서 공개키가 바꿔치기되지 않았는지 확인할 수
+  있습니다.
+- 개인 열쇠는 **보관 열쇠말로 scrypt 봉인한 상태로만** 이 기기에 둡니다. 같은 도메인의 다른
+  페이지가 저장소를 읽더라도 열쇠 자체는 보이지 않습니다. 「개인 열쇠 백업」으로 꺼내 적어 두고,
+  다른 기기에서 「불러오기」로 옮깁니다.
+- 공개키 봉인은 일회용 공개키 32바이트가 붙어 한글로 20자쯤 더 깁니다. 이 방식에서는 피할 수
+  없는 몫입니다.
+- **누가 보냈는지는 증명하지 않습니다.** 공개키만 알면 누구나 봉인해 보낼 수 있습니다.
+- X25519를 정수·BigInt로 계산하므로 상수 시간이 아닙니다. 같은 기기에서 복호화 시간을 수없이
+  잴 수 있는 공격자에게는 약할 수 있습니다 — 개인 기기에서 쓰는 도구라는 전제입니다.
+
+## 오프라인 · 한 파일 판
+
+- **오프라인**: 서비스 워커(`sw.js`)가 페이지와 글꼴 조각까지 모두 담아 둡니다. 한 번 열면
+  인터넷을 끊어도 열리고 봉인됩니다. 휴대전화에서는 「홈 화면에 추가」로 앱처럼 둘 수 있습니다.
+- **한 파일 판**(`milseo.html`, 146KB): CSS와 JS를 모두 안에 넣은 판입니다. 내려받아 두면
+  인터넷 없이, 그리고 **이 사이트가 앞으로 바뀌더라도** 지금 판 그대로 씁니다. 「보안 설계」에
+  적은 남은 한계(계정이 뚫려 코드가 바뀌는 경우)에 대한 대비입니다. 페이지 아래에 파일의 SHA-256을
+  적어 두었습니다. 글꼴은 넣지 않아 기기의 명조체로 보이고, Worker 없이 화면 쪽에서 계산합니다.
+  인라인 스크립트는 CSP 해시로만 허용하므로 다른 스크립트는 여전히 막힙니다.
+
+두 파일은 원본에서 만들어집니다. 원본을 고치면 `python tools/build.py`를 돌려 함께 올리세요.
+CI가 `--check`로 최신인지 확인합니다.
+
+## 자동 검사
+
+push할 때마다 GitHub Actions가 전부 검사합니다 (`.github/workflows/test.yml`).
+
+| 검사 | 내용 |
+|---|---|
+| `tools/build.py --check` | 만들어진 파일이 원본과 맞는지 |
+| `hangul_crypt.py selftest` | 압축·암호·표기·길이 감추기·공개키(RFC 7748) |
+| `tools/crosstest.py` | Python ↔ JS 바이트 단위 양방향 호환 (벡터 100개) |
+| `tools/browser-test.mjs` | **Chromium · Firefox · WebKit(사파리 엔진)**에서 실제 페이지 조작 — 봉인·해독·링크·CSP·외부 요청·공개키 전 과정·Python과의 교차 해독·오프라인·한 파일 판 (102건) |
+
+세 엔진을 모두 도는 까닭은, Chrome에서만 검사하다가 Firefox에서 봉인이 전혀 안 되는 문제를
+놓친 적이 있어서입니다(Firefox는 WebCrypto PBKDF2로 한 번에 256바이트까지만 뽑아 줍니다).
+
+```bash
+npm install && npx playwright install chromium firefox webkit
+node tools/browser-test.mjs
+```
 
 ## 한글 표기 — 글자 수가 절반이 되는 이유
 
@@ -285,8 +362,8 @@ O(log log n) 비트로 줄고, 늘어나는 크기는 최대 12%입니다. 32바
 참이 됩니다. 방문 사실조차 GitHub Pages 말고는 누구에게도 가지 않습니다.
 
 **남은 한계.** GitHub 계정이 뚫려 페이지 코드가 바뀌면 열쇠말을 빼돌리는 코드를 심을 수 있습니다.
-웹에서 암호화하는 도구의 공통 한계이며, 정말 중요한 글이라면 코드를 내려받아 로컬에서 쓰거나
-Python 판을 쓰는 편이 안전합니다.
+웹에서 암호화하는 도구의 공통 한계입니다. 정말 중요한 글이라면 **한 파일 판을 내려받아** 페이지에
+적힌 SHA-256과 맞춰 본 뒤 그것으로 봉인하거나, Python 판을 쓰는 편이 안전합니다.
 
 ## 주의사항
 
@@ -317,9 +394,15 @@ Python 판을 쓰는 편이 안전합니다.
 | `hangul_crypt.py` | Python 구현 + CLI |
 | `hangul_crypt.js` | JavaScript 구현 (브라우저 / Node.js) |
 | `index.html` | 웹 페이지 뼈대 (CSP 포함) |
+| `manifest.webmanifest`, `icons/` | 앱으로 설치할 때의 이름·아이콘 |
+| `sw.js` | 오프라인용 서비스 워커 (`tools/build.py`가 만듦) |
+| `milseo.html` | 한 파일 판 (`tools/build.py`가 만듦) |
 | `app.js` | 웹 페이지 동작 |
 | `style.css` | 웹 페이지 모양 |
 | `worker.js` | 무거운 계산을 맡는 Web Worker |
 | `fonts/` | Gowun Batang · Cutive Mono 조각과 라이선스 |
 | `tools/crosstest.py`, `tools/crosstest.js` | Python ↔ JS 양방향 호환성 검사 |
 | `tools/sync_corpus.py` | 코퍼스를 .py → .js 로 동기화 |
+| `tools/build.py` | `milseo.html`·`sw.js` 만들기 (`--check`로 최신인지 확인) |
+| `tools/browser-test.mjs`, `package.json` | 세 엔진 브라우저 자동 검사 (Playwright) |
+| `.github/workflows/test.yml` | push할 때마다 위 검사를 모두 돌린다 |
