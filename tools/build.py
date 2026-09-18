@@ -77,10 +77,23 @@ def sw_files():
     return files
 
 
+TEXT_EXT = ('.html', '.js', '.css', '.webmanifest', '.svg', '.json', '.txt')
+
+
+def file_bytes(name):
+    """판 번호 계산용 내용. 텍스트 파일은 줄바꿈을 LF로 맞춘다.
+
+    Windows 작업본은 git 설정에 따라 CRLF일 수 있고 레포·배포본은 LF다. 바이트를 그대로
+    해시하면 운영체제마다 판 번호가 달라져 CI의 --check가 실패한다(실제로 그랬다).
+    """
+    data = (ROOT / name).read_bytes()
+    return data.replace(b'\r\n', b'\n') if name.endswith(TEXT_EXT) else data
+
+
 def build_sw(index_html):
     h = hashlib.sha256()
     for name in sw_files():
-        data = index_html.encode('utf-8') if name == 'index.html' else (ROOT / name).read_bytes()
+        data = index_html.encode('utf-8') if name == 'index.html' else file_bytes(name)
         h.update(name.encode() + b'\0' + data + b'\0')
     version = h.hexdigest()[:12]
     listing = ',\n'.join(f"  '{f}'" for f in sw_files())
