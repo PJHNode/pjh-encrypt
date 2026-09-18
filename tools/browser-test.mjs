@@ -31,8 +31,18 @@ const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; ch
   '.webmanifest': 'application/manifest+json', '.png': 'image/png', '.svg': 'image/svg+xml',
   '.txt': 'text/plain; charset=utf-8' };
 
+// CF_PAGES=1 이면 Cloudflare Pages(PJH Hub가 쓰는 곳)처럼 굴린다:
+//   …/index.html → …/  ,  …/x.html → …/x  로 308 리다이렉트하고, 확장자 없는 주소는 x.html로 답한다.
+// 이 차이 때문에 서비스 워커가 두 번째 방문부터 페이지를 못 여는 문제가 실제 배포에서 났다.
+const CF = process.env.CF_PAGES === '1';
+
 const server = createServer(async (req, res) => {
   let p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+  if (CF && p.endsWith('.html')) {
+    const to = p.endsWith('/index.html') ? p.slice(0, -'index.html'.length) : p.slice(0, -'.html'.length);
+    res.writeHead(308, { Location: to }); res.end(); return;
+  }
+  if (CF && !p.endsWith('/') && !path.extname(p)) p += '.html';
   if (p.endsWith('/')) p += 'index.html';
   const file = path.join(SITE, p);
   if (!file.startsWith(SITE)) { res.writeHead(403); res.end(); return; }
@@ -129,7 +139,8 @@ async function runEngine(name) {
   };
 
   const version = browser.version();
-  console.log(`\n══ ${name} ${version}${BASE !== '/' ? '  (' + SITE + ' ' + BASE + ')' : ''} ══`);
+  console.log(`\n══ ${name} ${version}${BASE !== '/' ? '  (' + SITE + ' ' + BASE + ')' : ''}` +
+              `${CF ? '  [Cloudflare Pages 흉내]' : ''} ══`);
 
   // 1. 기본 · CSP · 외부 요청
   await open();

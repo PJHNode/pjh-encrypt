@@ -55,3 +55,11 @@ jobs:
         run: node tools/browser-test.mjs
         env:
           BROWSERS: ${{ matrix.browser }}
+      # PJH Hub가 쓰는 Cloudflare Pages는 .html 주소를 308로 돌린다. 이 차이 때문에 서비스
+      # 워커가 두 번째 방문부터 페이지를 못 여는 문제가 실제 배포에서 났다.
+      - name: Cloudflare Pages처럼 리다이렉트할 때
+        if: matrix.browser == 'chromium'
+        run: node tools/browser-test.mjs
+        env:
+          BROWSERS: chromium
+          CF_PAGES: '1'

@@ -70,7 +70,10 @@ def with_single_hash(html, digest):
 
 
 def sw_files():
-    files = ['index.html', 'app.js', 'style.css', 'hangul_crypt.js', 'worker.js',
+    # 페이지는 index.html이 아니라 폴더 주소('./')로 담는다. Cloudflare Pages는 index.html을
+    # 폴더 주소로 308 리다이렉트하는데, 리다이렉트를 거친 응답을 담아 두었다가 페이지 이동에
+    # 돌려주면 브라우저가 거부해 두 번째 방문부터 페이지가 아예 안 열렸다(실제 배포에서 확인).
+    files = ['./', 'app.js', 'style.css', 'hangul_crypt.js', 'worker.js',
              'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png',
              'icons/icon-512.png', 'fonts/fonts.css']
     files += sorted('fonts/' + p.name for p in (ROOT / 'fonts').glob('*.woff2'))
@@ -93,7 +96,7 @@ def file_bytes(name):
 def build_sw(index_html):
     h = hashlib.sha256()
     for name in sw_files():
-        data = index_html.encode('utf-8') if name == 'index.html' else file_bytes(name)
+        data = index_html.encode('utf-8') if name == './' else file_bytes(name)
         h.update(name.encode() + b'\0' + data + b'\0')
     version = h.hexdigest()[:12]
     listing = ',\n'.join(f"  '{f}'" for f in sw_files())
@@ -110,8 +113,23 @@ const FILES = [
 {listing}
 ];
 
+const SCOPE = self.registration.scope;   // 예: https://pjh-hub.pages.dev/encrypt/
+
+// 리다이렉트를 거친 응답은 페이지 이동에 돌려줄 수 없으므로 깨끗한 응답으로 다시 싼다
+function clean(res) {{
+  if (!res.redirected) return Promise.resolve(res);
+  return res.blob().then((body) => new Response(body, {{
+    status: res.status, statusText: res.statusText, headers: res.headers }}));
+}}
+
 self.addEventListener('install', (e) => {{
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(CACHE)
+    .then((c) => Promise.all(FILES.map((f) =>
+      fetch(f, {{ cache: 'no-cache' }}).then((res) => {{
+        if (!res.ok) throw new Error(f + ' ' + res.status);
+        return clean(res).then((r) => c.put(f, r));
+      }}))))
+    .then(() => self.skipWaiting()));
 }});
 
 self.addEventListener('activate', (e) => {{
@@ -127,7 +145,8 @@ self.addEventListener('fetch', (e) => {{
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
-  const key = url.pathname.endsWith('/') ? new URL('index.html', url).href : url.origin + url.pathname;
+  let key = url.origin + url.pathname;
+  if (key === SCOPE + 'index.html') key = SCOPE;   // 페이지는 폴더 주소로 담아 두었다
   e.respondWith(caches.open(CACHE)
     .then((c) => c.match(key))
     .then((hit) => hit || fetch(req)));

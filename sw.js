@@ -5,10 +5,10 @@
  * 그것을 먼저 쓰고(cache-first), 없는 것만 네트워크로 받는다. 파일이 하나라도
  * 바뀌면 아래 판 번호가 바뀌고, 브라우저는 새 판을 받아 다음에 열 때부터 쓴다.
  */
-const VERSION = '2f79c8775664';
+const VERSION = 'f6721937f801';
 const CACHE = 'milseo-' + VERSION;
 const FILES = [
-  'index.html',
+  './',
   'app.js',
   'style.css',
   'hangul_crypt.js',
@@ -212,8 +212,23 @@ const FILES = [
   'fonts/gowunbatang-ijwSs5nhRMIjYsdSgcMa3wRhWdnoyO9eQVvLv7TGp0JLNitJCzbi.99.woff2'
 ];
 
+const SCOPE = self.registration.scope;   // 예: https://pjh-hub.pages.dev/encrypt/
+
+// 리다이렉트를 거친 응답은 페이지 이동에 돌려줄 수 없으므로 깨끗한 응답으로 다시 싼다
+function clean(res) {
+  if (!res.redirected) return Promise.resolve(res);
+  return res.blob().then((body) => new Response(body, {
+    status: res.status, statusText: res.statusText, headers: res.headers }));
+}
+
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(CACHE)
+    .then((c) => Promise.all(FILES.map((f) =>
+      fetch(f, { cache: 'no-cache' }).then((res) => {
+        if (!res.ok) throw new Error(f + ' ' + res.status);
+        return clean(res).then((r) => c.put(f, r));
+      }))))
+    .then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (e) => {
@@ -229,7 +244,8 @@ self.addEventListener('fetch', (e) => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
-  const key = url.pathname.endsWith('/') ? new URL('index.html', url).href : url.origin + url.pathname;
+  let key = url.origin + url.pathname;
+  if (key === SCOPE + 'index.html') key = SCOPE;   // 페이지는 폴더 주소로 담아 두었다
   e.respondWith(caches.open(CACHE)
     .then((c) => c.match(key))
     .then((hit) => hit || fetch(req)));
