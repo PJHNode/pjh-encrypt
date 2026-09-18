@@ -8,6 +8,7 @@
 **웹에서 바로 쓰기 → [pjhnode.github.io/pjh-encrypt](https://pjhnode.github.io/pjh-encrypt/)**
 · 한 번 열면 인터넷 없이도 열리고, 휴대전화 홈 화면에 앱처럼 둘 수 있습니다.
 · [한 파일로 내려받기](https://pjhnode.github.io/pjh-encrypt/milseo.html) — 사이트가 바뀌어도 지금 판 그대로 씁니다.
+· [PJH Hub](https://pjh-hub.pages.dev/encrypt/)에도 들어 있습니다.
 
 [![검사](https://github.com/PJHNode/pjh-encrypt/actions/workflows/test.yml/badge.svg)](https://github.com/PJHNode/pjh-encrypt/actions/workflows/test.yml)
 
@@ -238,6 +239,20 @@ npm install && npx playwright install chromium firefox webkit
 node tools/browser-test.mjs
 ```
 
+## PJH Hub에 들어간 판
+
+[PJH Hub](https://pjh-hub.pages.dev/)의 `encrypt/`에 같은 페이지가 들어 있습니다. 원본은 이 레포이고,
+허브 사본은 `python tools/export_hub.py ../PJH-hub`로 내보냅니다. 허브용으로는 「← PJH Hub」 링크와
+제목·링크 미리보기 태그만 더하고, 암호 코드와 한 파일 판은 한 바이트도 바꾸지 않습니다.
+
+- 허브 빌드(`build-dist.mjs`)는 다른 앱의 JS 주석을 지우지만 `encrypt/`는 **그대로 복사**합니다.
+  한 파일 판은 인라인 스크립트의 CSP 해시로 돌고 페이지에 파일의 SHA-256을 적어 두어서, 한 글자만
+  바뀌어도 스크립트가 막히고 해시가 어긋납니다.
+- 허브에도 서비스 워커가 있습니다. 예전 허브 워커는 활성화될 때 **자기 것이 아닌 캐시까지 전부**
+  지워서, 밀서의 오프라인 캐시가 날아갔습니다(검사로 재현: 1개 → 0개). 자기 캐시만 지우도록 고쳤습니다.
+- 허브 사본도 같은 검사를 돕니다:
+  `MSYS_NO_PATHCONV=1 SITE_DIR=../PJH-hub/dist SITE_PATH=/encrypt/ node tools/browser-test.mjs`
+
 ## 한글 표기 — 글자 수가 절반이 되는 이유
 
 암호문을 옮길 때 문제가 되는 건 바이트가 아니라 **글자 수**입니다.
@@ -405,4 +420,5 @@ O(log log n) 비트로 줄고, 늘어나는 크기는 최대 12%입니다. 32바
 | `tools/sync_corpus.py` | 코퍼스를 .py → .js 로 동기화 |
 | `tools/build.py` | `milseo.html`·`sw.js` 만들기 (`--check`로 최신인지 확인) |
 | `tools/browser-test.mjs`, `package.json` | 세 엔진 브라우저 자동 검사 (Playwright) |
+| `tools/export_hub.py` | 웹 페이지를 PJH Hub의 `encrypt/`로 내보낸다 (`--check`로 최신인지 확인) |
 | `.github/workflows/test.yml` | push할 때마다 위 검사를 모두 돌린다 |

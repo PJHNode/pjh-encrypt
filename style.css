@@ -351,3 +351,8 @@ textarea.short { min-height: 64px; }
 #keyPanel .note { margin-top: 12px; font-style: normal; }
 
 code.hash { word-break: break-all; font-size: .8em; }
+
+/* PJH Hub 안에 들어갔을 때 허브로 돌아가는 링크 (tools/export_hub.py가 넣는다) */
+.hub-back { display: inline-block; margin-bottom: 18px; font-size: .78rem; color: var(--ink-dim);
+            text-decoration: none; letter-spacing: .08em; }
+.hub-back:hover { color: var(--ink); }

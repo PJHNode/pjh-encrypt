@@ -6,7 +6,7 @@
 <title>밀서 密書 (한 파일 판)</title>
 <meta name="description" content="한글 텍스트를 잘게 압축해서 암호로 봉인합니다. 모든 처리는 브라우저 안에서만 이루어집니다.">
 <link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA1MTIgNTEyIj4KICA8cmVjdCB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgZmlsbD0iI2YzZWJkYyIvPgogIDxnIHRyYW5zZm9ybT0idHJhbnNsYXRlKDI1NiAyNTYpIiBmaWxsPSJub25lIiBzdHJva2U9IiM4YTZkM2IiPgogICAgPGNpcmNsZSByPSIxNzgiIHN0cm9rZS13aWR0aD0iOSIvPgogICAgPGNpcmNsZSByPSIxNTgiIHN0cm9rZS13aWR0aD0iMy41Ii8+CiAgICA8Y2lyY2xlIHI9IjEzNCIgc3Ryb2tlLXdpZHRoPSIyNCIgc3Ryb2tlLWRhc2hhcnJheT0iNi41IDIxLjUiLz4KICAgIDxjaXJjbGUgcj0iMTA4IiBzdHJva2Utd2lkdGg9IjMuNSIvPgogICAgPGNpcmNsZSByPSI4NCIgc3Ryb2tlLXdpZHRoPSIxOCIgc3Ryb2tlLWRhc2hhcnJheT0iNSAxNi4yIiB0cmFuc2Zvcm09InJvdGF0ZSg3KSIvPgogICAgPGNpcmNsZSByPSI1NiIgc3Ryb2tlLXdpZHRoPSI5Ii8+CiAgICA8bGluZSB4MT0iMCIgeTE9IjAiIHgyPSIwIiB5Mj0iLTEyNiIgc3Ryb2tlPSIjOGMyZjI0IiBzdHJva2Utd2lkdGg9IjEzIiBzdHJva2UtbGluZWNhcD0icm91bmQiLz4KICAgIDxjaXJjbGUgcj0iMTYiIGZpbGw9IiM4YzJmMjQiIHN0cm9rZT0ibm9uZSIvPgogIDwvZz4KPC9zdmc+Cg==">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-c+bZr0oR9NCzSGSrXL4u5TTWnQoAtTBQkjY9m6xVb7U=' 'sha256-8OxVgXASPfk3fCzBFzsOlLnigqhDc2Yok8ILOUlT13M='; style-src 'sha256-vXYEr0JCLk0v0UwYmrEjeViTbyXOq3dXGMLoDGgrTXg='; img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-c+bZr0oR9NCzSGSrXL4u5TTWnQoAtTBQkjY9m6xVb7U=' 'sha256-8OxVgXASPfk3fCzBFzsOlLnigqhDc2Yok8ILOUlT13M='; style-src 'sha256-4sc9ZHqK3KGtWy77sPA0RyYRvAdcfjLuh67HARoZtYQ='; img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'">
 <style>/* 밀서 — 화면 모양. CSP 때문에 인라인 대신 파일로 둔다. */
 :root {
   /* 낮의 서안 — 오래된 종이 */
@@ -360,6 +360,11 @@ textarea.short { min-height: 64px; }
 #keyPanel .note { margin-top: 12px; font-style: normal; }
 
 code.hash { word-break: break-all; font-size: .8em; }
+
+/* PJH Hub 안에 들어갔을 때 허브로 돌아가는 링크 (tools/export_hub.py가 넣는다) */
+.hub-back { display: inline-block; margin-bottom: 18px; font-size: .78rem; color: var(--ink-dim);
+            text-decoration: none; letter-spacing: .08em; }
+.hub-back:hover { color: var(--ink); }
 </style>
 </head>
 <body>

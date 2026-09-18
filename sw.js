@@ -5,7 +5,7 @@
  * 그것을 먼저 쓰고(cache-first), 없는 것만 네트워크로 받는다. 파일이 하나라도
  * 바뀌면 아래 판 번호가 바뀌고, 브라우저는 새 판을 받아 다음에 열 때부터 쓴다.
  */
-const VERSION = '331c0d79b05f';
+const VERSION = '2f79c8775664';
 const CACHE = 'milseo-' + VERSION;
 const FILES = [
   'index.html',

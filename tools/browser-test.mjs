@@ -20,6 +20,10 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ENGINES = { chromium, firefox, webkit };
 const WANT = (process.env.BROWSERS || 'chromium,firefox,webkit').split(',').map((s) => s.trim());
 const PYTHON = process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
+// 검사할 사이트 — 기본은 이 레포. PJH Hub에 넣은 판을 검사할 때는 허브 빌드 결과와 하위 경로를 준다.
+//   SITE_DIR=../PJH-hub/dist SITE_PATH=/encrypt/ node tools/browser-test.mjs
+const SITE = path.resolve(process.env.SITE_DIR || ROOT);
+const BASE = process.env.SITE_PATH || '/';
 
 // ── 작은 정적 서버 ─────────────────────────────────────────────
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -30,8 +34,8 @@ const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; ch
 const server = createServer(async (req, res) => {
   let p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
   if (p.endsWith('/')) p += 'index.html';
-  const file = path.join(ROOT, p);
-  if (!file.startsWith(ROOT)) { res.writeHead(403); res.end(); return; }
+  const file = path.join(SITE, p);
+  if (!file.startsWith(SITE)) { res.writeHead(403); res.end(); return; }
   try {
     const body = await readFile(file);
     res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream' });
@@ -119,13 +123,13 @@ async function runEngine(name) {
   // 링크는 보통 새 탭에서 열리므로, 매번 빈 페이지를 거쳐 새로 불러온다
   const open = async (hash = '') => {
     await page.goto('about:blank');
-    await page.goto(ORIGIN + '/index.html' + hash);
+    await page.goto(ORIGIN + BASE + 'index.html' + hash);
     await page.waitForFunction(() => document.getElementById('meterText').textContent.length > 0 ||
                                       document.getElementById('notice').classList.contains('show'));
   };
 
   const version = browser.version();
-  console.log(`\n══ ${name} ${version} ══`);
+  console.log(`\n══ ${name} ${version}${BASE !== '/' ? '  (' + SITE + ' ' + BASE + ')' : ''} ══`);
 
   // 1. 기본 · CSP · 외부 요청
   await open();
@@ -289,7 +293,7 @@ async function runEngine(name) {
     check(cached > 190, '서비스 워커가 파일을 담아 둠 (' + cached + '개)');
     await context.setOffline(true);
     await page.goto('about:blank');
-    await page.goto(ORIGIN + '/index.html');
+    await page.goto(ORIGIN + BASE + 'index.html');
     await page.waitForFunction(() => document.getElementById('meterText').textContent.length > 0);
     await $('inputText').fill('인터넷이 끊겨도');
     await $('pw').fill('offline-pw');
@@ -306,7 +310,7 @@ async function runEngine(name) {
   single.setDefaultTimeout(90000);
   const singleErrors = [];
   single.on('pageerror', (e) => singleErrors.push(e.message));
-  await single.goto(pathToFileURL(path.join(ROOT, 'milseo.html')).href);
+  await single.goto(pathToFileURL(path.join(SITE, BASE, 'milseo.html')).href);
   await single.waitForFunction(() => document.getElementById('meterText').textContent.length > 0);
   const sPwned = await single.evaluate(() => {
     const s = document.createElement('script');
