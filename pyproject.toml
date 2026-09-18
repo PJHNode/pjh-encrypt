@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pjh-encrypt"
+version = "1.0.0"
+description = "한글 텍스트 초압축 + 암호화 도구 (Context Mixing + ChaCha20)"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "PJHNode" }]
+keywords = ["korean", "hangul", "compression", "encryption", "chacha20", "context-mixing"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Natural Language :: Korean",
+    "Topic :: Security :: Cryptography",
+    "Topic :: System :: Archiving :: Compression",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/PJHNode/pjh-encrypt"
+
+[project.scripts]
+hangul-crypt = "hangul_crypt:main"
+
+[tool.setuptools]
+py-modules = ["hangul_crypt"]
