@@ -488,8 +488,7 @@
   //   실제 공격은 열쇠말을 하나씩 넣어 보는 쪽으로 온다. scrypt는 시도 한 번마다
   //   메모리를 64MB씩 쓰게 만들어 GPU·전용 칩으로 대량 병렬 공격하는 비용을 올린다.
   //   N=2^16, r=8, p=2 는 OWASP가 N=2^17·r=8·p=1 과 같은 강도로 꼽는 값이다.
-  //   WebCrypto에는 scrypt가 없어서, 바깥 두 단계의 PBKDF2(1회)는 WebCrypto에 맡기고
-  //   메모리를 쓰는 ROMix만 여기서 돈다. 결과는 Python hashlib.scrypt와 같다.
+  //   WebCrypto에는 scrypt가 없어서 직접 구현한다. 결과는 Python hashlib.scrypt와 같다.
   var SCRYPT_N = 1 << 16;
   var SCRYPT_R = 8;
   var SCRYPT_P = 2;
@@ -568,15 +567,40 @@
     W.set(X);
   }
 
+  // PBKDF2-HMAC-SHA256 을 1회만 돈다 (scrypt의 바깥 두 단계).
+  //   WebCrypto의 PBKDF2를 쓰지 않는 까닭: Firefox는 한 번에 2048비트(256바이트)까지만
+  //   뽑아 주고 그 이상은 OperationError를 낸다. scrypt 첫 단계는 p·128·r = 2048바이트가
+  //   필요하다. 반복이 1회면 PBKDF2는 32바이트 블록마다 HMAC 한 번이므로, HMAC으로 직접
+  //   짜면 모든 브라우저에서 똑같이 돈다.
+  async function pbkdf2Once(hkey, salt, dkLen) {
+    var blocks = Math.ceil(dkLen / 32), jobs = [];
+    for (var i = 1; i <= blocks; i++) {
+      var msg = new Uint8Array(salt.length + 4);
+      msg.set(salt);
+      msg[salt.length] = (i >>> 24) & 255;
+      msg[salt.length + 1] = (i >>> 16) & 255;
+      msg[salt.length + 2] = (i >>> 8) & 255;
+      msg[salt.length + 3] = i & 255;
+      jobs.push(webcrypto.subtle.sign('HMAC', hkey, msg));
+    }
+    var parts = await Promise.all(jobs);
+    var out = new Uint8Array(blocks * 32);
+    for (var k = 0; k < parts.length; k++) out.set(new Uint8Array(parts[k]), k * 32);
+    return out.slice(0, dkLen);
+  }
+
   async function scrypt(pwBytes, salt, N, r, p, dkLen) {
-    var base = await webcrypto.subtle.importKey('raw', pwBytes, 'PBKDF2', false, ['deriveBits']);
-    var B = new Uint8Array(await webcrypto.subtle.deriveBits(
-      { name: 'PBKDF2', salt: salt, iterations: 1, hash: 'SHA-256' }, base, p * 128 * r * 8));
+    // HMAC은 64바이트보다 짧은 열쇠를 0으로 채워 쓰므로, 빈 열쇠말은 0 64바이트와 같다.
+    // (WebCrypto는 길이 0인 HMAC 열쇠를 받지 않는다)
+    var hkey = await webcrypto.subtle.importKey(
+      'raw', pwBytes.length ? pwBytes : new Uint8Array(64),
+      { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    var B = await pbkdf2Once(hkey, salt, p * 128 * r);
     var len = 32 * r;
     var V = new Int32Array(len * N);
     var X = new Int32Array(len), Y = new Int32Array(len), W = new Int32Array(len);
     var T = new Int32Array(16);
-    var dv = new DataView(B.buffer);
+    var dv = new DataView(B.buffer, B.byteOffset, B.byteLength);
     for (var i = 0; i < p; i++) {
       var off = i * 128 * r, k;
       for (k = 0; k < len; k++) W[k] = dv.getInt32(off + k * 4, true);   // 리틀엔디언
@@ -584,9 +608,7 @@
       for (k = 0; k < len; k++) dv.setInt32(off + k * 4, W[k], true);
     }
     V.fill(0);   // 64MB 작업 공간을 비워 둔다
-    var out = await webcrypto.subtle.deriveBits(
-      { name: 'PBKDF2', salt: B, iterations: 1, hash: 'SHA-256' }, base, dkLen * 8);
-    return new Uint8Array(out);
+    return pbkdf2Once(hkey, B, dkLen);
   }
 
   var SEED_OPT = [0, 4, 6, 8];
