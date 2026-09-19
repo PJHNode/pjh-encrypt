@@ -6,9 +6,12 @@
     python tools/export_hub.py ../PJH-hub --check    # 허브 사본이 최신인지만 본다
 
 원본은 이 레포다. 허브 사본은 손으로 고치지 말고, 여기서 고친 뒤 다시 내보낸다.
-허브에 맞춰 바꾸는 것은 index.html 머리말 몇 줄뿐이다:
+허브에 맞춰 바꾸는 것은 index.html 몇 줄뿐이다:
   - 허브로 돌아가는 「← PJH Hub」 링크 (허브의 다른 앱들과 같은 관례)
   - 제목 「밀서 — PJH Hub」와 링크 미리보기용 og 태그
+  - 하단(일러두기) 끝의 허브 저작권 한 줄 — 허브의 다른 페이지들과 같은 문구.
+    밀서의 CSP가 style-src 'self'라 인라인 style은 막히므로 align 속성만 쓰고,
+    글씨체·색은 밀서 footer 스타일을 그대로 물려받는다
 암호 코드(hangul_crypt.js)와 한 파일 판(milseo.html)은 한 바이트도 바꾸지 않는다.
 한 파일 판은 인라인 스크립트의 CSP 해시로 돌고, 페이지에 그 파일의 SHA-256을 적어
 두었기 때문이다. 허브 빌드(build-dist.mjs)도 encrypt/는 그대로 복사하게 해 두었다.
@@ -26,6 +29,8 @@ DIRS = ['icons', 'fonts']
 
 BACK = '''    <a class="hub-back" href="../">← PJH Hub</a>
 '''
+COPYRIGHT = '''    <p class="hub-copyright" align="center">PJH-Hub / Copyright 2026. 박준현 All rights reserved.</p>
+'''
 OG = '''<meta property="og:site_name" content="PJH Hub">
 <meta property="og:type" content="website">
 <meta property="og:title" content="밀서 密書 — PJH Hub">
@@ -37,7 +42,8 @@ OG = '''<meta property="og:site_name" content="PJH Hub">
 def hub_index(src):
     out = src.replace('<title>밀서 密書</title>', '<title>밀서 密書 — PJH Hub</title>\n' + OG.rstrip('\n'), 1)
     out = out.replace('  <header>\n', '  <header>\n' + BACK, 1)
-    assert '← PJH Hub' in out and 'og:title' in out, 'index.html 모양이 예상과 다릅니다'
+    out = out.replace('  </footer>\n', COPYRIGHT + '  </footer>\n', 1)
+    assert '← PJH Hub' in out and 'og:title' in out and 'hub-copyright' in out, 'index.html 모양이 예상과 다릅니다'
     return out
 
 
